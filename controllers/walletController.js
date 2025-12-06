@@ -1242,7 +1242,7 @@ exports.getWalletReport = async (req, res) => {
             email: col.collectedBy.email,
             role: col.collectedBy.role
           } : null),
-          createdBy: col.isSystemCollection || !col.collectedBy ? {
+          createdBy: (col.isSystemCollection || col.isSystematicEntry || !col.collectedBy) ? {
             id: null,
             name: 'System',
             email: null,
@@ -1269,7 +1269,10 @@ exports.getWalletReport = async (req, res) => {
           notes: col.notes || '',
           proofUrl: col.proofUrl || null,
           flagReason: col.flagReason || null,
-          isAutoPay: col.paymentModeId?.autoPay && col.mode !== 'Cash'
+          isAutoPay: col.paymentModeId?.autoPay && col.mode !== 'Cash',
+          isSystematicEntry: col.isSystematicEntry || false,
+          collectionType: col.collectionType || 'collection',
+          isSystemCollection: col.isSystemCollection || false
         };
       })
       .filter(col => col !== null); // Remove null entries (collections that don't match)

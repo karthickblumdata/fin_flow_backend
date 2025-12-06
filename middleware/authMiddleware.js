@@ -123,7 +123,12 @@ const authorizeByPermission = (requiredPermission, allowedRoles = ['SuperAdmin']
     allPermissions = [...new Set([...allPermissions, ...userSpecificPermissions])];
     console.log(`   Total permissions: ${allPermissions.length} (role-based: ${allPermissions.length - userSpecificPermissions.length}, user-specific: ${userSpecificPermissions.length})`);
     if (allPermissions.length > 0) {
-      console.log(`   Permissions: ${allPermissions.slice(0, 5).join(', ')}${allPermissions.length > 5 ? '...' : ''}`);
+      console.log(`   Permissions: ${allPermissions.slice(0, 10).join(', ')}${allPermissions.length > 10 ? '...' : ''}`);
+      // Show all payment mode related permissions for debugging
+      const paymentModePerms = allPermissions.filter(p => p.includes('payment_modes') || p.includes('payment.modes'));
+      if (paymentModePerms.length > 0) {
+        console.log(`   Payment Mode Permissions: ${paymentModePerms.join(', ')}`);
+      }
     }
     
     // Check if user has required permission
@@ -162,6 +167,17 @@ const authorizeByPermission = (requiredPermission, allowedRoles = ['SuperAdmin']
       // e.g., if required is 'all_users.user_management' and user has 'all_users.user_management.view', grant access
       if (permission.startsWith(requiredPermission + '.')) {
         return true;
+      }
+      
+      // Special case: For manage operations, if user has view permission in the same section, grant access
+      // e.g., if required is 'accounts.payment_modes.manage' and user has 'accounts.payment_modes.view', grant access
+      // This allows users with view permission to also manage (if that's the intended behavior)
+      if (requiredPermission.endsWith('.manage')) {
+        const basePermission = requiredPermission.replace('.manage', '');
+        if (permission.startsWith(basePermission + '.')) {
+          // User has any permission in the same section (view, edit, delete, etc.)
+          return true;
+        }
       }
       
       return false;

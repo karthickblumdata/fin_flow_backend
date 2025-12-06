@@ -21,6 +21,11 @@ const paymentModeSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  display: {
+    type: [String],
+    enum: ['Collection', 'Expenses', 'Transaction'],
+    default: ['Collection']
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

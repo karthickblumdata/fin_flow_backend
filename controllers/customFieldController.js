@@ -44,6 +44,10 @@ exports.createCustomField = async (req, res) => {
       req.ip
     );
 
+    // Emit socket event for real-time updates
+    const { emitCustomFieldUpdate } = require('../utils/socketService');
+    emitCustomFieldUpdate('created', customField.toObject());
+
     res.status(201).json({
       success: true,
       message: 'Custom field created successfully',
@@ -142,6 +146,10 @@ exports.updateCustomField = async (req, res) => {
       req.ip
     );
 
+    // Emit socket event for real-time updates
+    const { emitCustomFieldUpdate } = require('../utils/socketService');
+    emitCustomFieldUpdate('updated', customField.toObject());
+
     res.status(200).json({
       success: true,
       message: 'Custom field updated successfully',
@@ -189,6 +197,10 @@ exports.deleteCustomField = async (req, res) => {
       null,
       req.ip
     );
+
+    // Emit socket event for real-time updates
+    const { emitCustomFieldUpdate } = require('../utils/socketService');
+    emitCustomFieldUpdate('deleted', previousValue);
 
     res.status(200).json({
       success: true,

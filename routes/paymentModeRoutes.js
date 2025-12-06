@@ -27,10 +27,10 @@ router.get('/test', (req, res) => {
   });
 });
 
-// Payment mode routes - SuperAdmin OR roles with payment_modes.manage permission
-router.post('/', protect, authorizeByPermission('payment_modes.manage', ['SuperAdmin']), createPaymentMode);
+// Payment mode routes - SuperAdmin OR roles with accounts.payment_modes.manage permission
+router.post('/', protect, authorizeByPermission('accounts.payment_modes.manage', ['SuperAdmin']), createPaymentMode);
 router.get('/', protect, getPaymentModes);
-router.put('/:id', protect, authorizeByPermission('payment_modes.manage', ['SuperAdmin']), updatePaymentMode);
-router.delete('/:id', protect, authorizeByPermission('payment_modes.manage', ['SuperAdmin']), deletePaymentMode);
+router.put('/:id', protect, authorizeByPermission('accounts.payment_modes.manage', ['SuperAdmin']), updatePaymentMode);
+router.delete('/:id', protect, authorizeByPermission('accounts.payment_modes.manage', ['SuperAdmin']), deletePaymentMode);
 
 module.exports = router;

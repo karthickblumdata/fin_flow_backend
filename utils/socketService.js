@@ -393,6 +393,32 @@ const emitCollectionUpdate = (eventType, collectionData) => {
   console.log(`💰 [COLLECTION] ${eventType} event emitted to all users`);
 };
 
+// Emit custom field update to all connected users (for real-time updates)
+const emitCustomFieldUpdate = (eventType, customFieldData) => {
+  if (!io) {
+    console.warn('📝 [CUSTOM FIELD] Socket.IO not initialized');
+    return;
+  }
+
+  const data = {
+    event: eventType, // 'created', 'updated', 'deleted'
+    customField: customFieldData,
+    timestamp: new Date().toISOString()
+  };
+
+  // Emit appropriate event based on event type
+  if (eventType === 'created') {
+    io.emit('customFieldCreated', data);
+  } else if (eventType === 'deleted') {
+    io.emit('customFieldDeleted', data);
+  } else {
+    io.emit('customFieldUpdated', data);
+  }
+  // Also emit generic update event
+  io.emit('customFieldUpdate', data);
+  console.log(`📝 [CUSTOM FIELD] ${eventType} event emitted to all users`);
+};
+
 module.exports = {
   initializeSocket,
   emitAmountUpdate,
@@ -408,5 +434,6 @@ module.exports = {
   emitAllWalletReportsUpdate,
   emitPendingApprovalUpdate,
   emitTransactionUpdate,
-  emitCollectionUpdate
+  emitCollectionUpdate,
+  emitCustomFieldUpdate
 };

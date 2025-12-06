@@ -130,12 +130,12 @@ exports.createCollection = async (req, res) => {
     const collection = await Collection.create({
       voucherNumber,
       collectedBy: req.user._id, // Creator (collector)
-      from: req.user._id, // From (collector) - same as creator for Entry 1
+      from: req.user._id, // From: Collection person name (collector) - who collected the money
       customerName,
       amount,
       mode,
       paymentModeId,
-      assignedReceiver: receiverId,
+      assignedReceiver: receiverId, // To: Auto pay assigned person name (assigned receiver) - who receives the money
       proofUrl,
       notes,
       status: 'Pending',
@@ -354,9 +354,9 @@ exports.approveCollection = async (req, res) => {
     // Update Entry 1 status to Approved (but wallet NOT updated - Option A)
     // Set collectionType to 'collection' for Entry 1 (as per requirement)
     collection.collectionType = 'collection';
-    // Ensure 'from' field is set (for backward compatibility)
+    // Ensure 'from' field is set correctly - FROM: Collection person name (collector)
     if (!collection.from && collectedByUserId) {
-      collection.from = collectedByUserId;
+      collection.from = collectedByUserId; // From: Collection person name (collector)
     }
     collection.status = 'Approved';
     collection.approvedBy = req.user._id;
@@ -369,7 +369,6 @@ exports.approveCollection = async (req, res) => {
     
     // Only create Entry 2 and update wallet if not already approved and doesn't have Entry 2 (prevent double wallet update)
     let entry2Collection = null;
-    let systemTransaction = null;
     
     if (!wasAlreadyApproved && !hasEntry2) {
       // Create Entry 2 (System Collection) - same from/to as Entry 1, wallet updated ONCE here
@@ -377,9 +376,11 @@ exports.approveCollection = async (req, res) => {
       console.log(`   Entry 2 - Created by: System, From: Collector, To: ${assignedReceiverUserId ? 'Assigned Receiver' : 'N/A'}, Approved by: Approver`);
       
       // Entry 2: Same from/to as Entry 1 (collector → assignedReceiver)
-      // In collection model: collectedBy = from, assignedReceiver = to
+      // FROM: Collection person name (collector) - who collected the money
+      // TO: Auto pay assigned person name (assigned receiver) - who receives the money
+      // This applies to BOTH AutoPay enabled and disabled cases
       const entry2CollectedBy = collectedByUserId; // Collector (same as Entry 1)
-      const entry2AssignedReceiver = assignedReceiverUserId || collectedByUserId; // Assigned Receiver (same as Entry 1)
+      const entry2AssignedReceiver = assignedReceiverUserId || collectedByUserId; // Assigned Receiver (auto pay person) - same as Entry 1
       
       const entry2VoucherNumber = generateVoucherNumber();
       
@@ -392,17 +393,20 @@ exports.approveCollection = async (req, res) => {
       console.log(`   Wallet Updated - CashIn: ${entry2Wallet.cashIn}, CashOut: ${entry2Wallet.cashOut}, Balance: ${entry2Wallet.totalBalance} (+₹${collection.amount})`);
       
       // Create Entry 2 (System Collection) - same from/to as Entry 1, same approver
+      // FROM: Collection person name (collector) - who collected the money
+      // TO: Auto pay assigned person name (assigned receiver) - who receives the money
+      // Works for BOTH AutoPay enabled and disabled cases
       console.log(`\n   Step 2: Creating Entry 2 (system collection)...`);
       // Entry 2 should have collectionType = 'collection' (as per requirement)
       entry2Collection = await Collection.create({
       voucherNumber: entry2VoucherNumber,
       collectedBy: null, // Created by System (null for system collections)
-      from: collectedByUserId, // From: Collector (same as Entry 1)
+      from: collectedByUserId, // From: Collection person name (collector) - same as Entry 1
       customerName: collection.customerName,
       amount: collection.amount, // Same amount
       mode: collection.mode,
       paymentModeId: collection.paymentModeId,
-      assignedReceiver: entry2AssignedReceiver, // To: Assigned Receiver (same as Entry 1)
+      assignedReceiver: entry2AssignedReceiver, // To: Auto pay assigned person name (assigned receiver) - same as Entry 1
       proofUrl: collection.proofUrl,
       notes: collection.notes ? `System entry - ${collection.notes}` : 'System generated collection entry',
       status: 'Approved', // Auto-approved
@@ -416,42 +420,12 @@ exports.approveCollection = async (req, res) => {
     console.log(`     ✅ Entry 2 created: ${entry2Collection._id} (Voucher: ${entry2VoucherNumber})`);
     console.log(`     Entry 2 - From: Collector, To: ${assignedReceiverUserId ? 'Assigned Receiver' : 'Collector'}, Amount: ₹${collection.amount}, Approved by: Approver`);
     
-    // Create system transaction record for Entry 2 ONLY if AutoPay is NOT enabled in payment mode
-    // When AutoPay is enabled in payment mode (regardless of Cash/UPI/Bank), no transaction entry is needed
-    // AutoPay = automatic transfer, so no separate transaction history entry needed
-    let systemTransaction = null;
-    if (!autoPayEnabled) {
-      console.log(`\n   Step 3: Creating system transaction (AutoPay not enabled in payment mode)...`);
-      const approverUser = await User.findById(approverUserId);
-      const approverName = approverUser?.name || approverUser?.email || 'System';
-      const receiverUser = await User.findById(receiverUserId);
-      const receiverName = receiverUser?.name || receiverUser?.email || 'Unknown';
-      
-      systemTransaction = await Transaction.create({
-        initiatedBy: approverUserId,
-        sender: collectedByUserId, // Collector (for record keeping)
-        receiver: receiverUserId, // Receiver (who gets the money)
-        amount: collection.amount,
-        mode: collection.mode,
-        purpose: `Collection ${collection.voucherNumber} approved by ${approverName} - System entry ${entry2VoucherNumber}`,
-        status: 'Completed',
-        isAutoPay: false,
-        isSystemTransaction: true,
-        approvedBy: approverUserId,
-        linkedCollectionId: entry2Collection._id // Link to Entry 2
-      });
-
-        entry2Collection.systemTransactionId = systemTransaction._id;
-        collection.systemTransactionId = systemTransaction._id; // Also link Entry 1 to transaction
-        await entry2Collection.save();
-        await collection.save();
-        
-        console.log(`     ✅ System transaction created: ${systemTransaction._id}`);
-      } else {
-        console.log(`\n   Step 3: Skipping transaction creation (AutoPay enabled in payment mode - automatic transfer, no transaction entry needed)`);
-      }
-      
-      console.log(`[Collection Approval] ✅ Completed - Entry 1 (Pending→Approved, no wallet), Entry 2 (Approved, wallet updated)\n`);
+    // Transaction entry creation removed - both AutoPay enabled and disabled work the same way
+    // No separate transaction history entry needed for collection approvals
+    // Entry 2 (System Collection) handles the wallet update and record keeping
+    console.log(`\n   Step 3: Skipping transaction creation (No transaction entry needed for collection approvals)`);
+    
+    console.log(`[Collection Approval] ✅ Completed - Entry 1 (Pending→Approved, no wallet), Entry 2 (Approved, wallet updated)\n`);
     } else {
       console.log(`[Collection Approval] ⚠️  Collection was already approved - skipping wallet update to prevent double update\n`);
     }

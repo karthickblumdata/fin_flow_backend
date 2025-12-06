@@ -31,6 +31,7 @@ const transformCollection = (collection) => {
     status: collection.status || 'Pending',
     mode: collection.mode || 'Cash',
     isSystematicEntry: isSystematicEntry,
+    collectionType: collection.collectionType || (isSystematicEntry ? 'systematic' : 'collection'),
     isAutoPay: isAutoPay,
     flagged: isFlagged,
     details: {

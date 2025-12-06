@@ -6,7 +6,7 @@ const { createAuditLog } = require('../utils/auditLogger');
 // @access  Private (Admin, SuperAdmin)
 exports.createPaymentMode = async (req, res) => {
   try {
-    const { modeName, description, autoPay, assignedReceiver } = req.body;
+    const { modeName, description, autoPay, assignedReceiver, display } = req.body;
 
     // modeName is always required
     if (!modeName || modeName.trim() === '') {
@@ -25,11 +25,28 @@ exports.createPaymentMode = async (req, res) => {
       });
     }
 
+    // Validate and set display array
+    let displayArray = ['Collection']; // Default
+    console.log('[Create Payment Mode] Received display field:', display, 'Type:', typeof display, 'Is Array:', Array.isArray(display));
+    if (display && Array.isArray(display) && display.length > 0) {
+      // Validate display values
+      const validDisplayValues = ['Collection', 'Expenses', 'Transaction'];
+      displayArray = display.filter(d => validDisplayValues.includes(d));
+      console.log('[Create Payment Mode] Filtered display array:', displayArray);
+      if (displayArray.length === 0) {
+        displayArray = ['Collection']; // Fallback to default if all invalid
+        console.log('[Create Payment Mode] All display values invalid, using default:', displayArray);
+      }
+    } else {
+      console.log('[Create Payment Mode] No display field or empty, using default:', displayArray);
+    }
+
     const paymentMode = await PaymentMode.create({
       modeName: modeName.trim(),
       description: description ? description.trim() : undefined,
       autoPay: isAutoPay,
       assignedReceiver: assignedReceiver && assignedReceiver.trim() !== '' ? assignedReceiver : undefined,
+      display: displayArray,
       createdBy: req.user._id
     });
 
@@ -66,11 +83,30 @@ exports.getPaymentModes = async (req, res) => {
     console.log('User:', req.user ? { id: req.user._id, email: req.user.email, role: req.user.role } : 'Not found');
     console.log('Query params:', req.query);
     
+    // Get displayType filter from query (Collection, Expenses, Transaction)
+    const { displayType } = req.query;
+    
+    // Build filter query
+    const filter = { isActive: true };
+    
+    // Filter by display type if provided
+    if (displayType) {
+      // Map frontend display types to backend values
+      let displayValue = displayType;
+      if (displayType === 'Expense') {
+        displayValue = 'Expenses'; // Frontend uses 'Expense', backend uses 'Expenses'
+      }
+      
+      // Only show payment modes that have this display type in their display array
+      filter.display = { $in: [displayValue] };
+      console.log(`Filtering payment modes by display type: ${displayValue}`);
+    }
+    
     // Fetch only active payment modes for dropdowns and selections
-    // Filter by isActive: true to return only active payment modes
+    // Filter by isActive: true and display type if provided
     let paymentModes;
     try {
-      paymentModes = await PaymentMode.find({ isActive: true })
+      paymentModes = await PaymentMode.find(filter)
         .sort({ createdAt: -1 })
         .lean();
       
@@ -145,12 +181,35 @@ exports.updatePaymentMode = async (req, res) => {
     }
 
     const previousValue = paymentMode.toObject();
-    const { description, autoPay, assignedReceiver, isActive } = req.body;
+    const { description, autoPay, assignedReceiver, isActive, display } = req.body;
 
     if (description !== undefined) paymentMode.description = description;
     if (autoPay !== undefined) paymentMode.autoPay = autoPay;
     if (assignedReceiver !== undefined) paymentMode.assignedReceiver = assignedReceiver;
     if (isActive !== undefined) paymentMode.isActive = isActive;
+    
+    // Update display array if provided
+    console.log('[Update Payment Mode] Received display field:', display, 'Type:', typeof display, 'Is Array:', Array.isArray(display));
+    if (display !== undefined && Array.isArray(display)) {
+      // Validate display values
+      const validDisplayValues = ['Collection', 'Expenses', 'Transaction'];
+      const displayArray = display.filter(d => validDisplayValues.includes(d));
+      console.log('[Update Payment Mode] Filtered display array:', displayArray);
+      if (displayArray.length > 0) {
+        paymentMode.display = displayArray;
+        console.log('[Update Payment Mode] Setting display to:', paymentMode.display);
+      } else {
+        // If all invalid, keep existing or set to default
+        paymentMode.display = paymentMode.display && paymentMode.display.length > 0 
+          ? paymentMode.display 
+          : ['Collection'];
+        console.log('[Update Payment Mode] All display values invalid, keeping existing or default:', paymentMode.display);
+      }
+    } else if (display !== undefined) {
+      console.log('[Update Payment Mode] Display field provided but not an array, ignoring');
+    } else {
+      console.log('[Update Payment Mode] No display field provided, keeping existing:', paymentMode.display);
+    }
 
     await paymentMode.save();
 
