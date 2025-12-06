@@ -429,6 +429,7 @@ exports.getExpenses = async (req, res) => {
     const expenses = await Expense.find(query)
       .populate('userId', 'name email role')
       .populate('createdBy', 'name email role')
+      .populate('approvedBy', 'name email role')
       .sort({ createdAt: -1 });
 
     res.status(200).json({

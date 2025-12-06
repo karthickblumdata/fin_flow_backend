@@ -335,16 +335,23 @@ exports.approveCollection = async (req, res) => {
     console.log(`   AutoPay Enabled: ${autoPayEnabled}, Mode: ${collection.mode}, Has Receiver: ${hasAssignedReceiver}`);
     console.log(`   Will Run AutoPay: ${canRunAutoPay}`);
     
-    // Determine who gets the money - ALWAYS use assigned receiver (auto pay person)
-    // Money should ONLY go to assigned receiver, NOT to approver
-    // 1. If assigned receiver exists: use assigned receiver (auto pay person)
-    // 2. Otherwise: use collector
-    // NOTE: Approver can be anyone, but money always goes to assigned receiver
+    // Determine who gets the money
+    // IMPORTANT: When AutoPay is enabled, money ALWAYS goes to collector (who collected the money)
+    // When AutoPay is disabled, money goes to assignedReceiver (if exists) or collector
+    // NOTE: Approver can be anyone, but money goes based on AutoPay status
     let receiverUserId;
-    if (assignedReceiverUserId) {
-      receiverUserId = assignedReceiverUserId; // Always use assigned receiver (auto pay person)
+    if (autoPayEnabled && isNonCashMode) {
+      // AutoPay enabled: Money ALWAYS goes to collector (who collected the money)
+      receiverUserId = collectedByUserId;
+      console.log(`   ✅ AutoPay Enabled: Money will go to COLLECTOR (${collectedByUserId})`);
+    } else if (assignedReceiverUserId) {
+      // AutoPay disabled: Money goes to assigned receiver
+      receiverUserId = assignedReceiverUserId;
+      console.log(`   ✅ AutoPay Disabled: Money will go to ASSIGNED RECEIVER (${assignedReceiverUserId})`);
     } else {
-      receiverUserId = collectedByUserId; // Fallback to collector if no assigned receiver
+      // Fallback: Money goes to collector if no assigned receiver
+      receiverUserId = collectedByUserId;
+      console.log(`   ✅ No Assigned Receiver: Money will go to COLLECTOR (${collectedByUserId})`);
     }
     
     // Check if collection is already approved (for All Wallet Report - prevent double wallet update)
@@ -375,18 +382,24 @@ exports.approveCollection = async (req, res) => {
       console.log(`\n[Entry 2] Creating system collection...`);
       console.log(`   Entry 2 - Created by: System, From: Collector, To: ${assignedReceiverUserId ? 'Assigned Receiver' : 'N/A'}, Approved by: Approver`);
       
-      // Entry 2: Same from/to as Entry 1 (collector → assignedReceiver)
+      // Entry 2: FROM collector TO receiver (based on AutoPay status)
       // FROM: Collection person name (collector) - who collected the money
-      // TO: Auto pay assigned person name (assigned receiver) - who receives the money
-      // This applies to BOTH AutoPay enabled and disabled cases
+      // TO: When AutoPay enabled → collector, When AutoPay disabled → assignedReceiver
       const entry2CollectedBy = collectedByUserId; // Collector (same as Entry 1)
-      const entry2AssignedReceiver = assignedReceiverUserId || collectedByUserId; // Assigned Receiver (auto pay person) - same as Entry 1
+      // When AutoPay is enabled, receiver is collector. Otherwise, use assignedReceiver
+      const entry2AssignedReceiver = (autoPayEnabled && isNonCashMode) 
+        ? collectedByUserId  // AutoPay: receiver is collector
+        : (assignedReceiverUserId || collectedByUserId); // Normal: receiver is assignedReceiver or collector
       
       const entry2VoucherNumber = generateVoucherNumber();
       
-      // Update wallet ONCE for Entry 2 - money goes to receiver (assignedReceiver or approver)
+      // Update wallet ONCE for Entry 2 - money goes to receiver (collector if AutoPay, assignedReceiver if not)
       console.log(`\n   Step 1: Updating wallet for Entry 2 (ONLY wallet update)...`);
-      console.log(`   Adding ₹${collection.amount} to ${receiverUserId === assignedReceiverUserId ? 'Assigned Receiver' : receiverUserId === approverUserId ? 'Approver' : 'Collector'}'s wallet`);
+      const receiverType = (autoPayEnabled && isNonCashMode) 
+        ? 'Collector (AutoPay)' 
+        : (receiverUserId === assignedReceiverUserId ? 'Assigned Receiver' : 'Collector');
+      console.log(`   Adding ₹${collection.amount} to ${receiverType}'s wallet (User ID: ${receiverUserId})`);
+      console.log(`   Transaction Type: 'collection' (should update cashIn)`);
       const entry2Wallet = await updateWalletBalance(receiverUserId, collection.mode, collection.amount, 'add', 'collection');
       
       console.log(`   Wallet Updated - CashIn: ${entry2Wallet.cashIn}, CashOut: ${entry2Wallet.cashOut}, Balance: ${entry2Wallet.totalBalance} (+₹${collection.amount})`);
@@ -602,13 +615,18 @@ exports.rejectCollection = async (req, res) => {
       // Find Entry 2 (system collection) to reverse wallet
       const entry2 = await Collection.findOne({ parentCollectionId: collection._id, isSystemCollection: true });
       if (entry2) {
-        // Determine receiver who got the money
-        const receiverUserId = assignedReceiverUserId || collectedByUserId;
+        // Determine receiver who got the money - use Entry 2's assignedReceiver (it has the correct receiver)
+        // Entry 2's assignedReceiver will be collector if AutoPay was enabled, or assignedReceiver if not
+        const entry2ReceiverId = entry2.assignedReceiver 
+          ? (typeof entry2.assignedReceiver === 'object' && entry2.assignedReceiver._id 
+             ? entry2.assignedReceiver._id 
+             : entry2.assignedReceiver)
+          : (assignedReceiverUserId || collectedByUserId); // Fallback to original logic
         
-        if (receiverUserId) {
+        if (entry2ReceiverId) {
           // Reverse wallet: subtract the amount that was added
-          await updateWalletBalance(receiverUserId, collection.mode, collection.amount, 'subtract', 'collection_rejection');
-          console.log(`[Collection Reject] Reversed wallet: -₹${collection.amount} from receiver`);
+          await updateWalletBalance(entry2ReceiverId, collection.mode, collection.amount, 'subtract', 'collection_rejection');
+          console.log(`[Collection Reject] Reversed wallet: -₹${collection.amount} from receiver (${entry2ReceiverId})`);
         }
         
         // Delete Entry 2

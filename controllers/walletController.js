@@ -1061,6 +1061,7 @@ exports.getWalletReport = async (req, res) => {
         ? Expense.find(expenseFilter)
             .populate('userId', 'name email role')
             .populate('createdBy', 'name email role')
+            .populate('approvedBy', 'name email role')
             .sort({ createdAt: -1 })
         : [],
       includeTransactions
@@ -1114,6 +1115,12 @@ exports.getWalletReport = async (req, res) => {
         name: exp.createdBy.name,
         email: exp.createdBy.email,
         role: exp.createdBy.role
+      } : null,
+      approvedBy: exp.approvedBy ? {
+        id: exp.approvedBy._id,
+        name: exp.approvedBy.name,
+        email: exp.approvedBy.email,
+        role: exp.approvedBy.role
       } : null,
       from: exp.userId ? exp.userId.name : 'Unknown',
       to: '-',
