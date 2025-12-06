@@ -122,7 +122,10 @@ exports.getPaymentModes = async (req, res) => {
       
       // Only show payment modes that have this display type in their display array
       filter.display = { $in: [displayValue] };
-      console.log(`Filtering payment modes by display type: ${displayValue}`);
+      console.log(`\n🔍 [Payment Mode Filter] Filtering by display type: "${displayValue}"`);
+      console.log(`   Filter query:`, JSON.stringify(filter, null, 2));
+    } else {
+      console.log(`\n🔍 [Payment Mode Filter] No displayType filter - returning all active payment modes`);
     }
     
     // Fetch only active payment modes for dropdowns and selections
@@ -133,7 +136,13 @@ exports.getPaymentModes = async (req, res) => {
         .sort({ createdAt: -1 })
         .lean();
       
-      console.log(`Found ${paymentModes.length} active payment modes (before populate)`);
+      console.log(`   Found ${paymentModes.length} active payment modes (before populate)`);
+      if (displayType) {
+        console.log(`   ✅ Filtered payment modes by display type: "${displayType}"`);
+        paymentModes.forEach((mode, index) => {
+          console.log(`   [${index + 1}] ${mode.modeName}: display = ${JSON.stringify(mode.display)}`);
+        });
+      }
       
       // Now populate assignedReceiver for each mode separately to handle errors gracefully
       const User = require('../models/userModel');
@@ -230,26 +239,32 @@ exports.updatePaymentMode = async (req, res) => {
     if (isActive !== undefined) paymentMode.isActive = isActive;
     
     // Update display array if provided
+    console.log(`\n📝 [Update Payment Mode] Processing display field`);
     console.log(`   Received display field:`, display, `Type:`, typeof display, `Is Array:`, Array.isArray(display));
+    console.log(`   Previous display value:`, JSON.stringify(paymentMode.display || []));
+    
     if (display !== undefined && Array.isArray(display)) {
       // Validate display values
       const validDisplayValues = ['Collection', 'Expenses', 'Transaction'];
       const displayArray = display.filter(d => validDisplayValues.includes(d));
+      console.log(`   Valid display values:`, validDisplayValues);
+      console.log(`   Received display array:`, display);
       console.log(`   Filtered display array:`, displayArray);
+      
       if (displayArray.length > 0) {
         paymentMode.display = displayArray;
-        console.log(`   ✅ Setting display to:`, paymentMode.display);
+        console.log(`   ✅ Setting display to:`, JSON.stringify(paymentMode.display));
       } else {
         // If all invalid, keep existing or set to default
         paymentMode.display = paymentMode.display && paymentMode.display.length > 0 
           ? paymentMode.display 
           : ['Collection'];
-        console.log(`   ⚠️  All display values invalid, keeping existing or default:`, paymentMode.display);
+        console.log(`   ⚠️  All display values invalid, keeping existing or default:`, JSON.stringify(paymentMode.display));
       }
     } else if (display !== undefined) {
       console.log(`   ⚠️  Display field provided but not an array, ignoring`);
     } else {
-      console.log(`   No display field provided, keeping existing:`, paymentMode.display || []);
+      console.log(`   No display field provided, keeping existing:`, JSON.stringify(paymentMode.display || []));
     }
 
     await paymentMode.save();

@@ -386,31 +386,10 @@ exports.approveCollection = async (req, res) => {
       
       // Update wallet ONCE for Entry 2 - money goes to receiver (assignedReceiver or approver)
       console.log(`\n   Step 1: Updating wallet for Entry 2 (ONLY wallet update)...`);
-      console.log(`   Receiver User ID: ${receiverUserId}`);
-      console.log(`   Mode: ${collection.mode}, Amount: ₹${collection.amount}`);
       console.log(`   Adding ₹${collection.amount} to ${receiverUserId === assignedReceiverUserId ? 'Assigned Receiver' : receiverUserId === approverUserId ? 'Approver' : 'Collector'}'s wallet`);
-      
-      // Get wallet BEFORE update
-      const { getOrCreateWallet } = require('../utils/walletHelper');
-      const walletBefore = await getOrCreateWallet(receiverUserId);
-      console.log(`   Wallet BEFORE Update:`);
-      console.log(`     - Cash Balance: ₹${walletBefore.cashBalance}`);
-      console.log(`     - UPI Balance: ₹${walletBefore.upiBalance}`);
-      console.log(`     - Bank Balance: ₹${walletBefore.bankBalance}`);
-      console.log(`     - Cash In: ₹${walletBefore.cashIn}`);
-      console.log(`     - Cash Out: ₹${walletBefore.cashOut}`);
-      console.log(`     - Total Balance: ₹${walletBefore.totalBalance}`);
-      
       const entry2Wallet = await updateWalletBalance(receiverUserId, collection.mode, collection.amount, 'add', 'collection');
       
-      console.log(`   Wallet AFTER Update:`);
-      console.log(`     - Cash Balance: ₹${entry2Wallet.cashBalance}`);
-      console.log(`     - UPI Balance: ₹${entry2Wallet.upiBalance}`);
-      console.log(`     - Bank Balance: ₹${entry2Wallet.bankBalance}`);
-      console.log(`     - Cash In: ₹${entry2Wallet.cashIn} (${entry2Wallet.cashIn > walletBefore.cashIn ? '✅ INCREASED' : '❌ NOT INCREASED'})`);
-      console.log(`     - Cash Out: ₹${entry2Wallet.cashOut}`);
-      console.log(`     - Total Balance: ₹${entry2Wallet.totalBalance} (${entry2Wallet.totalBalance > walletBefore.totalBalance ? '✅ INCREASED' : '❌ NOT INCREASED'})`);
-      console.log(`   ✅ Wallet Updated Successfully - CashIn: +₹${entry2Wallet.cashIn - walletBefore.cashIn}, Balance: +₹${entry2Wallet.totalBalance - walletBefore.totalBalance}`);
+      console.log(`   Wallet Updated - CashIn: ${entry2Wallet.cashIn}, CashOut: ${entry2Wallet.cashOut}, Balance: ${entry2Wallet.totalBalance} (+₹${collection.amount})`);
       
       // Create Entry 2 (System Collection) - same from/to as Entry 1, same approver
       // FROM: Collection person name (collector) - who collected the money

@@ -65,12 +65,14 @@ const upload = multer({
   }
 });
 
-// Expense type routes - SuperAdmin OR roles with expense_types.manage permission
-router.post('/', protect, authorizeByPermission('expense_types.manage', ['SuperAdmin']), createExpenseType);
+// Expense type routes - SuperAdmin OR roles with expenses.expenses_type.create/edit/delete permissions
+// Note: Using 'expenses.expenses_type.create' to match frontend permission structure
+// The middleware will also accept parent permission 'expenses.expenses_type' or 'expenses'
+router.post('/', protect, authorizeByPermission('expenses.expenses_type.create', ['SuperAdmin']), createExpenseType);
 router.get('/', protect, getExpenseTypes);
-router.put('/:id', protect, authorizeByPermission('expense_types.manage', ['SuperAdmin']), updateExpenseType);
-router.delete('/:id', protect, authorizeByPermission('expense_types.manage', ['SuperAdmin']), deleteExpenseType);
-router.post('/upload-image', protect, authorizeByPermission('expense_types.manage', ['SuperAdmin']), upload.single('image'), uploadExpenseTypeImage);
+router.put('/:id', protect, authorizeByPermission('expenses.expenses_type.edit', ['SuperAdmin']), updateExpenseType);
+router.delete('/:id', protect, authorizeByPermission('expenses.expenses_type.delete', ['SuperAdmin']), deleteExpenseType);
+router.post('/upload-image', protect, authorizeByPermission('expenses.expenses_type.create', ['SuperAdmin']), upload.single('image'), uploadExpenseTypeImage);
 
 module.exports = router;
 

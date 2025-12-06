@@ -180,6 +180,27 @@ const authorizeByPermission = (requiredPermission, allowedRoles = ['SuperAdmin']
         }
       }
       
+      // Special case: For create/edit/delete operations, if user has parent permission, grant access
+      // e.g., if required is 'expenses.expenses_type.create' and user has 'expenses.expenses_type', grant access
+      // This allows users with the parent permission to perform all child operations
+      if (requiredPermission.endsWith('.create') || requiredPermission.endsWith('.edit') || requiredPermission.endsWith('.delete')) {
+        const basePermission = requiredPermission.substring(0, requiredPermission.lastIndexOf('.'));
+        if (permission === basePermission || permission.startsWith(basePermission + '.')) {
+          // User has parent permission or any child permission in the same section
+          return true;
+        }
+      }
+      
+      // Backward compatibility: Also check for old permission format 'expense_types.manage'
+      // This allows roles with the old permission format to still work
+      if (requiredPermission === 'expenses.expenses_type.create' || 
+          requiredPermission === 'expenses.expenses_type.edit' || 
+          requiredPermission === 'expenses.expenses_type.delete') {
+        if (permission === 'expense_types.manage' || permission === 'expenses.expenses_type.manage') {
+          return true;
+        }
+      }
+      
       return false;
     });
     

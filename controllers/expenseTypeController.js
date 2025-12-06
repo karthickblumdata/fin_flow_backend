@@ -8,9 +8,24 @@ const { emitExpenseTypeUpdate } = require('../utils/socketService');
 // @access  Private (Admin, SuperAdmin)
 exports.createExpenseType = async (req, res) => {
   try {
+    console.log('\n📝 ===== CREATE EXPENSE TYPE REQUEST =====');
+    console.log('   Timestamp:', new Date().toISOString());
+    console.log('   IP:', req.ip || req.connection.remoteAddress);
+    console.log('   User:', req.user?.email || req.user?._id || 'unknown');
+    console.log('   User Role:', req.user?.role || 'unknown');
+    console.log('   Request Body:', {
+      name: req.body?.name || 'not provided',
+      description: req.body?.description ? 'provided' : 'not provided',
+      isActive: req.body?.isActive !== undefined ? req.body.isActive : 'not provided',
+      imageUrl: req.body?.imageUrl ? 'provided' : 'not provided',
+      proofRequired: req.body?.proofRequired !== undefined ? req.body.proofRequired : 'not provided',
+    });
+    console.log('==========================================\n');
+
     const { name, description, isActive, imageUrl, proofRequired } = req.body;
 
     if (!name || name.trim() === '') {
+      console.log('❌ Validation Failed: Expense type name is required');
       return res.status(400).json({
         success: false,
         message: 'Please provide expense type name'
@@ -23,58 +38,92 @@ exports.createExpenseType = async (req, res) => {
     });
 
     if (existingType) {
+      console.log(`❌ Expense type already exists: ${name.trim()}`);
       return res.status(400).json({
         success: false,
         message: 'Expense type with this name already exists'
       });
     }
 
-    const expenseType = await ExpenseType.create({
+    const expenseTypeData = {
       name: name.trim(),
       description: description || '',
       isActive: isActive !== undefined ? isActive : true,
       imageUrl: imageUrl || '',
       proofRequired: proofRequired !== undefined ? proofRequired : false,
       createdBy: req.user._id
-    });
+    };
 
-    await createAuditLog(
-      req.user._id,
-      `Created expense type: ${expenseType.name}`,
-      'Create',
-      'ExpenseType',
-      expenseType._id,
-      null,
-      expenseType.toObject(),
-      req.ip
-    );
+    console.log('✅ Creating expense type with data:', expenseTypeData);
+
+    const expenseType = await ExpenseType.create(expenseTypeData);
+
+    console.log(`✅ Expense type created successfully: ${expenseType.name} (ID: ${expenseType._id})`);
+
+    // Create audit log with error handling
+    try {
+      await createAuditLog(
+        req.user._id,
+        `Created expense type: ${expenseType.name}`,
+        'Create',
+        'ExpenseType',
+        expenseType._id,
+        null,
+        expenseType.toObject(),
+        req.ip
+      );
+      console.log('✅ Audit log created successfully');
+    } catch (auditError) {
+      console.error('⚠️ Error creating audit log:', auditError);
+      // Don't fail the request if audit log fails
+    }
 
     // Get unapproved expense count for the new type
-    const expenseCount = await Expense.countDocuments({ 
-      category: expenseType.name,
-      status: { $nin: ['Approved', 'approved'] }
-    });
+    let expenseCount = 0;
+    try {
+      expenseCount = await Expense.countDocuments({ 
+        category: expenseType.name,
+        status: { $nin: ['Approved', 'approved'] }
+      });
+    } catch (countError) {
+      console.error('⚠️ Error counting expenses:', countError);
+      // Continue even if count fails
+    }
 
     const expenseTypeWithCount = {
       ...expenseType.toObject(),
       expenseCount
     };
 
-    // Emit real-time update
-    emitExpenseTypeUpdate('created', expenseTypeWithCount);
+    // Emit real-time update with error handling
+    try {
+      emitExpenseTypeUpdate('created', expenseTypeWithCount);
+      console.log('✅ Real-time update emitted');
+    } catch (socketError) {
+      console.error('⚠️ Error emitting real-time update:', socketError);
+      // Don't fail the request if socket emit fails
+    }
 
+    console.log('✅ Sending success response');
     res.status(201).json({
       success: true,
       message: 'Expense type created successfully',
       expenseType: expenseTypeWithCount
     });
   } catch (error) {
+    console.error('\n❌ ===== ERROR CREATING EXPENSE TYPE =====');
+    console.error('   Error:', error.message);
+    console.error('   Stack:', error.stack);
+    console.error('   Error Code:', error.code);
+    console.error('==========================================\n');
+
     if (error.code === 11000) {
       return res.status(400).json({
         success: false,
         message: 'Expense type with this name already exists'
       });
     }
+    
     res.status(500).json({
       success: false,
       message: error.message || 'Failed to create expense type'
