@@ -209,6 +209,23 @@ exports.createExpense = async (req, res) => {
       });
     }
 
+    // Get target user to check active status
+    const targetUser = await User.findById(targetUserId);
+    if (!targetUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'Target user not found'
+      });
+    }
+
+    // Check if target user is active
+    if (!targetUser.isVerified) {
+      return res.status(403).json({
+        success: false,
+        message: 'User is inactive. Only active users can have expenses created for them.'
+      });
+    }
+
     // Prepare expense data (use normalized category name)
     const expenseData = {
       userId: targetUserId,

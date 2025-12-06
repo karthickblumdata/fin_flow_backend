@@ -17,7 +17,7 @@ const auditLogSchema = new mongoose.Schema({
   },
   entityType: {
     type: String,
-    enum: ['User', 'Wallet', 'Transaction', 'Collection', 'Expense', 'PaymentMode', 'ExpenseType'],
+    enum: ['User', 'Wallet', 'Transaction', 'Collection', 'Expense', 'PaymentMode', 'ExpenseType', 'CustomField'],
     required: true
   },
   entityId: {

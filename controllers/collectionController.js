@@ -66,7 +66,7 @@ const hasSmartApprovalsPermission = async (userId, action, itemType = 'collectio
 // @access  Private (Staff)
 exports.createCollection = async (req, res) => {
   try {
-    const { customerName, amount, mode, paymentModeId, assignedReceiver, proofUrl, notes } = req.body;
+    const { customerName, amount, mode, paymentModeId, assignedReceiver, proofUrl, notes, customFields } = req.body;
 
     if (!customerName || !amount || !mode || !paymentModeId) {
       return res.status(400).json({
@@ -94,6 +94,31 @@ exports.createCollection = async (req, res) => {
       // Normal flow: use provided assignedReceiver, paymentMode's assignedReceiver, or logged-in user
       receiverId = assignedReceiver || paymentMode.assignedReceiver || req.user._id;
     }
+
+    // Check if collector (logged-in user) is active
+    if (!req.user.isVerified) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are inactive. Only active users can create collections.'
+      });
+    }
+
+    // Get receiver user to check active status
+    const receiverUser = await User.findById(receiverId);
+    if (!receiverUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'Receiver user not found'
+      });
+    }
+
+    // Check if receiver is active
+    if (!receiverUser.isVerified) {
+      return res.status(403).json({
+        success: false,
+        message: 'Receiver user is inactive. Only active users can receive collections.'
+      });
+    }
     
     const voucherNumber = generateVoucherNumber();
     
@@ -115,7 +140,8 @@ exports.createCollection = async (req, res) => {
       notes,
       status: 'Pending',
       collectionType: collectionType,
-      isSystematicEntry: isSystematicEntry
+      isSystematicEntry: isSystematicEntry,
+      customFields: customFields || {}
     });
 
     await createAuditLog(

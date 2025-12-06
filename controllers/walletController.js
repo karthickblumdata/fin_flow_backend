@@ -93,6 +93,31 @@ const createWalletTransaction = async (wallet, type, mode, amount, operation, pe
   }
 };
 
+// @desc    Check if user has wallet (without creating)
+// @route   GET /api/wallet/check/:userId?
+// @access  Private
+exports.checkWalletExists = async (req, res) => {
+  try {
+    // If userId is provided in params, use it; otherwise check current user
+    const userId = req.params.userId && req.params.userId !== 'null' && req.params.userId !== 'undefined'
+      ? req.params.userId
+      : req.user._id;
+    
+    // Check if wallet exists without creating
+    const wallet = await Wallet.findOne({ userId });
+    
+    res.status(200).json({
+      success: true,
+      hasWallet: wallet !== null
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
 // @desc    Get wallet balance
 // @route   GET /api/wallet
 // @access  Private

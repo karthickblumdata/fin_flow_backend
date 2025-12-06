@@ -64,7 +64,11 @@ const userSchema = new mongoose.Schema({
   userSpecificPermissions: [{
     type: String,
     trim: true
-  }]
+  }],
+  isNonWalletUser: {
+    type: Boolean,
+    default: false  // Default: false (normal user with wallet)
+  }
 }, {
   timestamps: true
 });

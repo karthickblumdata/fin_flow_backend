@@ -4,6 +4,7 @@ const { createAuditLog } = require('../utils/auditLogger');
 const { notifyAmountUpdate } = require('../utils/amountUpdateHelper');
 const User = require('../models/userModel');
 const WalletTransaction = require('../models/walletTransactionModel');
+const Wallet = require('../models/walletModel');
 
 // Helper function to create wallet transaction entry
 const createWalletTransaction = async (wallet, type, mode, amount, operation, performedBy, options = {}) => {
@@ -135,14 +136,37 @@ exports.createTransaction = async (req, res) => {
       });
     }
 
-    // Ensure wallets exist for both users before processing
-    try {
-      await getOrCreateWallet(sender);
-      await getOrCreateWallet(receiver);
-    } catch (walletError) {
-      return res.status(500).json({
+    // Check if sender is active
+    if (!senderUser.isVerified) {
+      return res.status(403).json({
         success: false,
-        message: `Failed to initialize wallets: ${walletError.message}`
+        message: 'Sender user is inactive. Only active users can create transactions.'
+      });
+    }
+
+    // Check if receiver is active
+    if (!receiverUser.isVerified) {
+      return res.status(403).json({
+        success: false,
+        message: 'Receiver user is inactive. Only active users can receive transactions.'
+      });
+    }
+
+    // Check if sender has wallet (non-wallet users cannot send transactions)
+    const senderWallet = await Wallet.findOne({ userId: sender });
+    if (!senderWallet) {
+      return res.status(403).json({
+        success: false,
+        message: 'Sender user does not have a wallet. Non-wallet users cannot create transactions.'
+      });
+    }
+
+    // Check if receiver has wallet (non-wallet users cannot receive transactions)
+    const receiverWallet = await Wallet.findOne({ userId: receiver });
+    if (!receiverWallet) {
+      return res.status(403).json({
+        success: false,
+        message: 'Receiver user does not have a wallet. Non-wallet users cannot receive transactions.'
       });
     }
 

@@ -48,7 +48,7 @@ exports.createUser = async (req, res) => {
     console.log('   Creator Role:', req.user?.role || 'unknown');
     console.log('===============================\n');
 
-    const { name, email, role, userSpecificPermissions, phoneNumber, countryCode, dateOfBirth, profileImage } = req.body;
+    const { name, email, role, userSpecificPermissions, phoneNumber, countryCode, dateOfBirth, profileImage, skipWallet } = req.body;
 
     if (!name || !email || !role) {
       console.log('❌ Validation Failed: Missing required fields');
@@ -175,7 +175,8 @@ exports.createUser = async (req, res) => {
       password: generatedPassword, // Password will be hashed by pre-save hook
       isVerified: true, // Mark as verified since we're sending credentials
       createdBy: req.user._id,
-      userSpecificPermissions: finalPermissions // Use provided permissions or empty array
+      userSpecificPermissions: finalPermissions, // Use provided permissions or empty array
+      isNonWalletUser: skipWallet ? true : false  // Set flag based on skipWallet
     };
 
     // Add phone number if provided
@@ -198,13 +199,17 @@ exports.createUser = async (req, res) => {
 
     const user = await User.create(userData);
 
-    // Auto-create wallet for new user
-    try {
-      await getOrCreateWallet(user._id);
-      console.log('✅ Wallet created automatically for new user:', user.email);
-    } catch (walletError) {
-      console.error('⚠️  Warning: Failed to create wallet for new user:', walletError.message);
-      // Don't fail user creation if wallet creation fails - it will be created on first access
+    // Auto-create wallet for new user (unless skipWallet is true)
+    if (!skipWallet) {
+      try {
+        await getOrCreateWallet(user._id);
+        console.log('✅ Wallet created automatically for new user:', user.email);
+      } catch (walletError) {
+        console.error('⚠️  Warning: Failed to create wallet for new user:', walletError.message);
+        // Don't fail user creation if wallet creation fails - it will be created on first access
+      }
+    } else {
+      console.log('ℹ️  Wallet creation skipped for new user:', user.email);
     }
 
     // Verify password was hashed (should be ~60 characters for bcrypt)
@@ -428,6 +433,16 @@ exports.getUsers = async (req, res) => {
     const usersWithProfileImage = users.filter(u => u.profileImage && u.profileImage.trim() !== '').length;
     console.log(`📸 Users with profileImage: ${usersWithProfileImage} out of ${users.length}`);
 
+    // Log isNonWalletUser status for debugging
+    const nonWalletUsers = users.filter(u => u.isNonWalletUser === true).length;
+    console.log(`👤 Users with isNonWalletUser=true: ${nonWalletUsers} out of ${users.length}`);
+    
+    // Debug: Log sample user to verify isNonWalletUser is included
+    if (users.length > 0) {
+      const sampleUser = users[0];
+      console.log(`📋 Sample user data check - Email: ${sampleUser.email}, isNonWalletUser: ${sampleUser.isNonWalletUser} (type: ${typeof sampleUser.isNonWalletUser})`);
+    }
+
     res.status(200).json({
       success: true,
       count: users.length,
@@ -447,7 +462,7 @@ exports.getUsers = async (req, res) => {
 // @access  Private (SuperAdmin only)
 exports.updateUser = async (req, res) => {
   try {
-    const { name, email, role, dateOfBirth, profileImage, phoneNumber, countryCode, isVerified } = req.body;
+    const { name, email, role, dateOfBirth, profileImage, phoneNumber, countryCode, isVerified, isNonWalletUser } = req.body;
     const user = await User.findById(req.params.id);
 
     if (!user) {
@@ -534,6 +549,11 @@ exports.updateUser = async (req, res) => {
       user.isVerified = isVerified === true || isVerified === 'true' || isVerified === 1;
     }
 
+    // Update isNonWalletUser if provided
+    if (isNonWalletUser !== undefined) {
+      user.isNonWalletUser = isNonWalletUser === true || isNonWalletUser === 'true' || isNonWalletUser === 1;
+    }
+
     await user.save();
 
     await createAuditLog(
@@ -578,6 +598,7 @@ exports.updateUser = async (req, res) => {
         email: user.email,
         role: user.role,
         isVerified: user.isVerified,
+        isNonWalletUser: user.isNonWalletUser,
         dateOfBirth: user.dateOfBirth,
         profileImage: user.profileImage,
         phoneNumber: user.phoneNumber,

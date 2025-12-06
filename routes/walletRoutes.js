@@ -8,9 +8,11 @@ const {
   withdrawAmount,
   getWalletReport,
   getSelfWalletReport,
-  getWalletTransactionById
+  getWalletTransactionById,
+  checkWalletExists
 } = require('../controllers/walletController');
 
+router.get('/check/:userId?', protect, checkWalletExists);
 router.get('/', protect, getWallet);
 // Allow SuperAdmin role OR any role with wallet.all permission to view all wallets
 // This means any newly created role with wallet.all permission will automatically have access

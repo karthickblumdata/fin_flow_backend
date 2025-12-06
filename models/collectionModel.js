@@ -97,6 +97,11 @@ const collectionSchema = new mongoose.Schema({
   isSystemCollection: {
     type: Boolean,
     default: false
+  },
+  customFields: {
+    type: Map,
+    of: String,
+    default: {}
   }
 }, {
   timestamps: true

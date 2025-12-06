@@ -28,6 +28,7 @@ const settingsRoutes = require('./routes/settingsRoutes');
 const roleRoutes = require('./routes/roleRoutes');
 const permissionRoutes = require('./routes/permissionRoutes');
 const allWalletReportsRoutes = require('./routes/allWalletReportsRoutes');
+const customFieldRoutes = require('./routes/customFieldRoutes');
 
 // Connect to database
 connectDB();
@@ -73,6 +74,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api/permissions', permissionRoutes);
 app.use('/api/all-wallet-reports', allWalletReportsRoutes);
+app.use('/api/collection-custom-fields', customFieldRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

@@ -185,7 +185,8 @@ exports.login = async (req, res) => {
         name: freshUser.name,
         email: freshUser.email,
         role: freshUser.role,
-        permissions: allPermissions // This includes role + user-specific permissions combined
+        permissions: allPermissions, // This includes role + user-specific permissions combined
+        isNonWalletUser: freshUser.isNonWalletUser || false  // Include non-wallet user flag
       }
     });
   } catch (error) {

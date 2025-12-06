@@ -186,21 +186,31 @@ const sendOtpEmail = async (email, otp, purpose = 'verification') => {
     });
     
     // Provide helpful error messages for common issues
-    if (error.code === 'EAUTH' || error.message.includes('Invalid login') || error.message.includes('BadCredentials')) {
-      console.error('\n🔧 ===== GMAIL AUTHENTICATION ERROR - FIX INSTRUCTIONS =====');
-      console.error('Gmail requires an App Password, not your regular password.');
-      console.error('\n📝 Steps to fix:');
-      console.error('1. Go to your Google Account: https://myaccount.google.com/');
-      console.error('2. Enable 2-Step Verification (if not already enabled)');
-      console.error('3. Go to: https://myaccount.google.com/apppasswords');
-      console.error('4. Select "Mail" and "Other (Custom name)"');
-      console.error('5. Enter a name like "Node.js App" and click "Generate"');
-      console.error('6. Copy the 16-character App Password (without spaces)');
-      console.error('7. Update your .env file:');
-      console.error('   EMAIL_USER=your-email@gmail.com');
-      console.error('   EMAIL_PASS=your-16-char-app-password');
-      console.error('\n⚠️  Important: Use the App Password, NOT your regular Gmail password!');
-      console.error('=============================================================\n');
+    const isAuthError = error.code === 'EAUTH' || 
+                       error.message.includes('Invalid login') || 
+                       error.message.includes('BadCredentials') ||
+                       error.message.includes('535-5.7.8') ||
+                       error.message.includes('Username and Password not accepted') ||
+                       error.message.includes('Gmail authentication failed');
+    
+    if (isAuthError) {
+      // Instructions already logged in verify() catch block, but log again if error occurred during send
+      if (!error.message.includes('See instructions in the error log above')) {
+        console.error('\n🔧 ===== GMAIL AUTHENTICATION ERROR - FIX INSTRUCTIONS =====');
+        console.error('Gmail requires an App Password, not your regular password.');
+        console.error('\n📝 Steps to fix:');
+        console.error('1. Go to your Google Account: https://myaccount.google.com/');
+        console.error('2. Enable 2-Step Verification (if not already enabled)');
+        console.error('3. Go to: https://myaccount.google.com/apppasswords');
+        console.error('4. Select "Mail" and "Other (Custom name)"');
+        console.error('5. Enter a name like "Node.js App" and click "Generate"');
+        console.error('6. Copy the 16-character App Password (without spaces)');
+        console.error('7. Update your .env file:');
+        console.error('   EMAIL_USER=your-email@gmail.com');
+        console.error('   EMAIL_PASS=your-16-char-app-password');
+        console.error('\n⚠️  Important: Use the App Password, NOT your regular Gmail password!');
+        console.error('=============================================================\n');
+      }
       
       throw new Error('Gmail authentication failed. Please use a Gmail App Password. Check the console for detailed instructions.');
     }
@@ -250,8 +260,32 @@ const sendInviteEmail = async (email, name, password) => {
       console.log('✅ Email transporter verified successfully');
     } catch (verifyError) {
       console.error('❌ Email transporter verification failed:', verifyError.message);
-      if (verifyError.code === 'EAUTH' || verifyError.message.includes('Invalid login')) {
-        throw new Error('Gmail authentication failed. Please use an App Password instead of your regular Gmail password.');
+      
+      // Check for specific Gmail authentication errors
+      const isAuthError = verifyError.code === 'EAUTH' || 
+                         verifyError.message.includes('Invalid login') ||
+                         verifyError.message.includes('BadCredentials') ||
+                         verifyError.message.includes('535-5.7.8') ||
+                         verifyError.message.includes('Username and Password not accepted');
+      
+      if (isAuthError) {
+        // Provide detailed instructions before throwing error
+        console.error('\n🔧 ===== GMAIL AUTHENTICATION ERROR - FIX INSTRUCTIONS =====');
+        console.error('Gmail requires an App Password, not your regular password.');
+        console.error('\n📝 Steps to fix:');
+        console.error('1. Go to your Google Account: https://myaccount.google.com/');
+        console.error('2. Enable 2-Step Verification (if not already enabled)');
+        console.error('3. Go to: https://myaccount.google.com/apppasswords');
+        console.error('4. Select "Mail" and "Other (Custom name)"');
+        console.error('5. Enter a name like "Node.js App" and click "Generate"');
+        console.error('6. Copy the 16-character App Password (without spaces)');
+        console.error('7. Update your .env file:');
+        console.error('   EMAIL_USER=your-email@gmail.com');
+        console.error('   EMAIL_PASS=your-16-char-app-password');
+        console.error('\n⚠️  Important: Use the App Password, NOT your regular Gmail password!');
+        console.error('=============================================================\n');
+        
+        throw new Error('Gmail authentication failed. Please use an App Password instead of your regular Gmail password. See instructions in the error log above.');
       }
       throw verifyError;
     }
@@ -372,21 +406,31 @@ const sendInviteEmail = async (email, name, password) => {
     console.error('==========================================\n');
     
     // Provide helpful error messages for common issues
-    if (error.code === 'EAUTH' || error.message.includes('Invalid login') || error.message.includes('BadCredentials') || error.message.includes('Gmail authentication failed')) {
-      console.error('\n🔧 ===== GMAIL AUTHENTICATION ERROR - FIX INSTRUCTIONS =====');
-      console.error('Gmail requires an App Password, not your regular password.');
-      console.error('\n📝 Steps to fix:');
-      console.error('1. Go to your Google Account: https://myaccount.google.com/');
-      console.error('2. Enable 2-Step Verification (if not already enabled)');
-      console.error('3. Go to: https://myaccount.google.com/apppasswords');
-      console.error('4. Select "Mail" and "Other (Custom name)"');
-      console.error('5. Enter a name like "Node.js App" and click "Generate"');
-      console.error('6. Copy the 16-character App Password (without spaces)');
-      console.error('7. Update your .env file:');
-      console.error('   EMAIL_USER=your-email@gmail.com');
-      console.error('   EMAIL_PASS=your-16-char-app-password');
-      console.error('\n⚠️  Important: Use the App Password, NOT your regular Gmail password!');
-      console.error('=============================================================\n');
+    const isAuthError = error.code === 'EAUTH' || 
+                       error.message.includes('Invalid login') || 
+                       error.message.includes('BadCredentials') ||
+                       error.message.includes('535-5.7.8') ||
+                       error.message.includes('Username and Password not accepted') ||
+                       error.message.includes('Gmail authentication failed');
+    
+    if (isAuthError) {
+      // Instructions already logged in verify() catch block, but log again if error occurred during send
+      if (!error.message.includes('See instructions in the error log above')) {
+        console.error('\n🔧 ===== GMAIL AUTHENTICATION ERROR - FIX INSTRUCTIONS =====');
+        console.error('Gmail requires an App Password, not your regular password.');
+        console.error('\n📝 Steps to fix:');
+        console.error('1. Go to your Google Account: https://myaccount.google.com/');
+        console.error('2. Enable 2-Step Verification (if not already enabled)');
+        console.error('3. Go to: https://myaccount.google.com/apppasswords');
+        console.error('4. Select "Mail" and "Other (Custom name)"');
+        console.error('5. Enter a name like "Node.js App" and click "Generate"');
+        console.error('6. Copy the 16-character App Password (without spaces)');
+        console.error('7. Update your .env file:');
+        console.error('   EMAIL_USER=your-email@gmail.com');
+        console.error('   EMAIL_PASS=your-16-char-app-password');
+        console.error('\n⚠️  Important: Use the App Password, NOT your regular Gmail password!');
+        console.error('=============================================================\n');
+      }
       
       throw new Error('Failed to send invite email: Gmail authentication failed. Please use a Gmail App Password. Check the console for detailed instructions.');
     }
@@ -437,8 +481,32 @@ const sendResetPasswordEmail = async (email, password, name = 'User', dateOfBirt
       console.log('✅ Email transporter verified successfully');
     } catch (verifyError) {
       console.error('❌ Email transporter verification failed:', verifyError.message);
-      if (verifyError.code === 'EAUTH' || verifyError.message.includes('Invalid login')) {
-        throw new Error('Gmail authentication failed. Please use an App Password instead of your regular Gmail password.');
+      
+      // Check for specific Gmail authentication errors
+      const isAuthError = verifyError.code === 'EAUTH' || 
+                         verifyError.message.includes('Invalid login') ||
+                         verifyError.message.includes('BadCredentials') ||
+                         verifyError.message.includes('535-5.7.8') ||
+                         verifyError.message.includes('Username and Password not accepted');
+      
+      if (isAuthError) {
+        // Provide detailed instructions before throwing error
+        console.error('\n🔧 ===== GMAIL AUTHENTICATION ERROR - FIX INSTRUCTIONS =====');
+        console.error('Gmail requires an App Password, not your regular password.');
+        console.error('\n📝 Steps to fix:');
+        console.error('1. Go to your Google Account: https://myaccount.google.com/');
+        console.error('2. Enable 2-Step Verification (if not already enabled)');
+        console.error('3. Go to: https://myaccount.google.com/apppasswords');
+        console.error('4. Select "Mail" and "Other (Custom name)"');
+        console.error('5. Enter a name like "Node.js App" and click "Generate"');
+        console.error('6. Copy the 16-character App Password (without spaces)');
+        console.error('7. Update your .env file:');
+        console.error('   EMAIL_USER=your-email@gmail.com');
+        console.error('   EMAIL_PASS=your-16-char-app-password');
+        console.error('\n⚠️  Important: Use the App Password, NOT your regular Gmail password!');
+        console.error('=============================================================\n');
+        
+        throw new Error('Gmail authentication failed. Please use an App Password instead of your regular Gmail password. See instructions in the error log above.');
       }
       throw verifyError;
     }
@@ -532,21 +600,31 @@ const sendResetPasswordEmail = async (email, password, name = 'User', dateOfBirt
     console.error('==================================================\n');
     
     // Provide helpful error messages for common issues
-    if (error.code === 'EAUTH' || error.message.includes('Invalid login') || error.message.includes('BadCredentials') || error.message.includes('Gmail authentication failed')) {
-      console.error('\n🔧 ===== GMAIL AUTHENTICATION ERROR - FIX INSTRUCTIONS =====');
-      console.error('Gmail requires an App Password, not your regular password.');
-      console.error('\n📝 Steps to fix:');
-      console.error('1. Go to your Google Account: https://myaccount.google.com/');
-      console.error('2. Enable 2-Step Verification (if not already enabled)');
-      console.error('3. Go to: https://myaccount.google.com/apppasswords');
-      console.error('4. Select "Mail" and "Other (Custom name)"');
-      console.error('5. Enter a name like "Node.js App" and click "Generate"');
-      console.error('6. Copy the 16-character App Password (without spaces)');
-      console.error('7. Update your .env file:');
-      console.error('   EMAIL_USER=your-email@gmail.com');
-      console.error('   EMAIL_PASS=your-16-char-app-password');
-      console.error('\n⚠️  Important: Use the App Password, NOT your regular Gmail password!');
-      console.error('=============================================================\n');
+    const isAuthError = error.code === 'EAUTH' || 
+                       error.message.includes('Invalid login') || 
+                       error.message.includes('BadCredentials') ||
+                       error.message.includes('535-5.7.8') ||
+                       error.message.includes('Username and Password not accepted') ||
+                       error.message.includes('Gmail authentication failed');
+    
+    if (isAuthError) {
+      // Instructions already logged in verify() catch block, but log again if error occurred during send
+      if (!error.message.includes('See instructions in the error log above')) {
+        console.error('\n🔧 ===== GMAIL AUTHENTICATION ERROR - FIX INSTRUCTIONS =====');
+        console.error('Gmail requires an App Password, not your regular password.');
+        console.error('\n📝 Steps to fix:');
+        console.error('1. Go to your Google Account: https://myaccount.google.com/');
+        console.error('2. Enable 2-Step Verification (if not already enabled)');
+        console.error('3. Go to: https://myaccount.google.com/apppasswords');
+        console.error('4. Select "Mail" and "Other (Custom name)"');
+        console.error('5. Enter a name like "Node.js App" and click "Generate"');
+        console.error('6. Copy the 16-character App Password (without spaces)');
+        console.error('7. Update your .env file:');
+        console.error('   EMAIL_USER=your-email@gmail.com');
+        console.error('   EMAIL_PASS=your-16-char-app-password');
+        console.error('\n⚠️  Important: Use the App Password, NOT your regular Gmail password!');
+        console.error('=============================================================\n');
+      }
       
       throw new Error('Failed to send password reset email: Gmail authentication failed. Please use a Gmail App Password. Check the console for detailed instructions.');
     }
