@@ -6,6 +6,19 @@ const { createAuditLog } = require('../utils/auditLogger');
 // @access  Private (Admin, SuperAdmin)
 exports.createPaymentMode = async (req, res) => {
   try {
+    // Log user information
+    const User = require('../models/userModel');
+    const user = await User.findById(req.user._id).select('name email role').lean();
+    const userName = user?.name || user?.email || 'Unknown';
+    const userId = req.user._id.toString();
+    
+    console.log('\n📝 ===== CREATE PAYMENT MODE REQUEST =====');
+    console.log(`   User ID: ${userId}`);
+    console.log(`   User Name: ${userName}`);
+    console.log(`   User Email: ${user?.email || 'N/A'}`);
+    console.log(`   User Role: ${user?.role || 'N/A'}`);
+    console.log('==========================================\n');
+    
     const { modeName, description, autoPay, assignedReceiver, display } = req.body;
 
     // modeName is always required
@@ -27,18 +40,19 @@ exports.createPaymentMode = async (req, res) => {
 
     // Validate and set display array
     let displayArray = ['Collection']; // Default
-    console.log('[Create Payment Mode] Received display field:', display, 'Type:', typeof display, 'Is Array:', Array.isArray(display));
+    console.log(`\n[Create Payment Mode] User: ${userName} (ID: ${userId})`);
+    console.log(`   Received display field:`, display, `Type:`, typeof display, `Is Array:`, Array.isArray(display));
     if (display && Array.isArray(display) && display.length > 0) {
       // Validate display values
       const validDisplayValues = ['Collection', 'Expenses', 'Transaction'];
       displayArray = display.filter(d => validDisplayValues.includes(d));
-      console.log('[Create Payment Mode] Filtered display array:', displayArray);
+      console.log(`   Filtered display array:`, displayArray);
       if (displayArray.length === 0) {
         displayArray = ['Collection']; // Fallback to default if all invalid
-        console.log('[Create Payment Mode] All display values invalid, using default:', displayArray);
+        console.log(`   ⚠️  All display values invalid, using default:`, displayArray);
       }
     } else {
-      console.log('[Create Payment Mode] No display field or empty, using default:', displayArray);
+      console.log(`   No display field or empty, using default:`, displayArray);
     }
 
     const paymentMode = await PaymentMode.create({
@@ -49,6 +63,15 @@ exports.createPaymentMode = async (req, res) => {
       display: displayArray,
       createdBy: req.user._id
     });
+
+    console.log(`\n✅ [Create Payment Mode] User: ${userName} (ID: ${userId})`);
+    console.log(`   Payment Mode Created Successfully:`);
+    console.log(`   - ID: ${paymentMode._id}`);
+    console.log(`   - Name: ${paymentMode.modeName}`);
+    console.log(`   - Display: ${JSON.stringify(paymentMode.display)}`);
+    console.log(`   - AutoPay: ${paymentMode.autoPay}`);
+    console.log(`   - IsActive: ${paymentMode.isActive}`);
+    console.log('==========================================\n');
 
     await createAuditLog(
       req.user._id,
@@ -171,6 +194,20 @@ exports.getPaymentModes = async (req, res) => {
 // @access  Private (Admin, SuperAdmin)
 exports.updatePaymentMode = async (req, res) => {
   try {
+    // Log user information
+    const User = require('../models/userModel');
+    const user = await User.findById(req.user._id).select('name email role').lean();
+    const userName = user?.name || user?.email || 'Unknown';
+    const userId = req.user._id.toString();
+    
+    console.log('\n📝 ===== UPDATE PAYMENT MODE REQUEST =====');
+    console.log(`   User ID: ${userId}`);
+    console.log(`   User Name: ${userName}`);
+    console.log(`   User Email: ${user?.email || 'N/A'}`);
+    console.log(`   User Role: ${user?.role || 'N/A'}`);
+    console.log(`   Payment Mode ID: ${req.params.id}`);
+    console.log('==========================================\n');
+    
     const paymentMode = await PaymentMode.findById(req.params.id);
 
     if (!paymentMode) {
@@ -182,6 +219,10 @@ exports.updatePaymentMode = async (req, res) => {
 
     const previousValue = paymentMode.toObject();
     const { description, autoPay, assignedReceiver, isActive, display } = req.body;
+    
+    console.log(`[Update Payment Mode] User: ${userName} (ID: ${userId})`);
+    console.log(`   Payment Mode: ${paymentMode.modeName} (ID: ${paymentMode._id})`);
+    console.log(`   Previous Display: ${JSON.stringify(paymentMode.display || [])}`);
 
     if (description !== undefined) paymentMode.description = description;
     if (autoPay !== undefined) paymentMode.autoPay = autoPay;
@@ -189,29 +230,38 @@ exports.updatePaymentMode = async (req, res) => {
     if (isActive !== undefined) paymentMode.isActive = isActive;
     
     // Update display array if provided
-    console.log('[Update Payment Mode] Received display field:', display, 'Type:', typeof display, 'Is Array:', Array.isArray(display));
+    console.log(`   Received display field:`, display, `Type:`, typeof display, `Is Array:`, Array.isArray(display));
     if (display !== undefined && Array.isArray(display)) {
       // Validate display values
       const validDisplayValues = ['Collection', 'Expenses', 'Transaction'];
       const displayArray = display.filter(d => validDisplayValues.includes(d));
-      console.log('[Update Payment Mode] Filtered display array:', displayArray);
+      console.log(`   Filtered display array:`, displayArray);
       if (displayArray.length > 0) {
         paymentMode.display = displayArray;
-        console.log('[Update Payment Mode] Setting display to:', paymentMode.display);
+        console.log(`   ✅ Setting display to:`, paymentMode.display);
       } else {
         // If all invalid, keep existing or set to default
         paymentMode.display = paymentMode.display && paymentMode.display.length > 0 
           ? paymentMode.display 
           : ['Collection'];
-        console.log('[Update Payment Mode] All display values invalid, keeping existing or default:', paymentMode.display);
+        console.log(`   ⚠️  All display values invalid, keeping existing or default:`, paymentMode.display);
       }
     } else if (display !== undefined) {
-      console.log('[Update Payment Mode] Display field provided but not an array, ignoring');
+      console.log(`   ⚠️  Display field provided but not an array, ignoring`);
     } else {
-      console.log('[Update Payment Mode] No display field provided, keeping existing:', paymentMode.display);
+      console.log(`   No display field provided, keeping existing:`, paymentMode.display || []);
     }
 
     await paymentMode.save();
+    
+    console.log(`\n✅ [Update Payment Mode] User: ${userName} (ID: ${userId})`);
+    console.log(`   Payment Mode Updated Successfully:`);
+    console.log(`   - ID: ${paymentMode._id}`);
+    console.log(`   - Name: ${paymentMode.modeName}`);
+    console.log(`   - Display: ${JSON.stringify(paymentMode.display)}`);
+    console.log(`   - AutoPay: ${paymentMode.autoPay}`);
+    console.log(`   - IsActive: ${paymentMode.isActive}`);
+    console.log('==========================================\n');
 
     await createAuditLog(
       req.user._id,

@@ -919,13 +919,36 @@ exports.updateUserPermissions = async (req, res) => {
     const { userSpecificPermissions } = req.body;
     const userId = req.params.id;
 
+    // Get user information for logging
+    const User = require('../models/userModel');
+    const updaterUser = await User.findById(req.user._id).select('name email role').lean();
+    const updaterName = updaterUser?.name || updaterUser?.email || 'Unknown';
+    const updaterId = req.user._id.toString();
+    
+    const targetUser = await User.findById(userId).select('name email role').lean();
+    const targetUserName = targetUser?.name || targetUser?.email || 'Unknown';
+    const targetUserId = userId.toString();
+    
     console.log('\n📝 ===== UPDATE USER PERMISSIONS REQUEST =====');
-    console.log('   User ID:', userId);
+    console.log('   Target User ID:', targetUserId);
+    console.log('   Target User Name:', targetUserName);
+    console.log('   Target User Email:', targetUser?.email || 'N/A');
+    console.log('   Target User Role:', targetUser?.role || 'N/A');
+    console.log('   Updated By ID:', updaterId);
+    console.log('   Updated By Name:', updaterName);
+    console.log('   Updated By Email:', updaterUser?.email || 'N/A');
+    console.log('   Updated By Role:', updaterUser?.role || 'N/A');
     console.log('   Request Permissions Count:', userSpecificPermissions?.length || 0);
     if (userSpecificPermissions && Array.isArray(userSpecificPermissions)) {
       console.log('   Request Permissions:', userSpecificPermissions);
+      // Check if expenses permissions are included
+      const expensesPerms = userSpecificPermissions.filter(p => p.includes('expenses') || p.includes('Expenses'));
+      if (expensesPerms.length > 0) {
+        console.log('   ✅ Expenses Permissions Found:', expensesPerms);
+      } else {
+        console.log('   ⚠️  No Expenses Permissions in Request');
+      }
     }
-    console.log('   Updated By:', req.user?.email || 'unknown');
     console.log('===============================================\n');
 
     // First, get the user to check existence and get old permissions
@@ -1023,13 +1046,24 @@ exports.updateUserPermissions = async (req, res) => {
     }
 
     console.log('\n✅ ===== USER PERMISSIONS UPDATED SUCCESSFULLY =====');
-    console.log('   User ID:', updatedUser._id);
-    console.log('   User Email:', updatedUser.email);
+    console.log('   Target User ID:', updatedUser._id);
+    console.log('   Target User Name:', targetUserName);
+    console.log('   Target User Email:', updatedUser.email);
+    console.log('   Target User Role:', updatedUser.role);
+    console.log('   Updated By ID:', updaterId);
+    console.log('   Updated By Name:', updaterName);
+    console.log('   Updated By Email:', updaterUser?.email || 'N/A');
     console.log('   Old Permissions Count:', oldPermissions.length);
     console.log('   New Permissions Count:', savedPermissions.length);
     console.log('   Permissions Saved:', savedPermissions);
+    // Check if expenses permissions were saved
+    const savedExpensesPerms = savedPermissions.filter(p => p.includes('expenses') || p.includes('Expenses'));
+    if (savedExpensesPerms.length > 0) {
+      console.log('   ✅ Expenses Permissions Saved:', savedExpensesPerms);
+    } else {
+      console.log('   ⚠️  No Expenses Permissions in Saved Permissions');
+    }
     console.log('   Verified from Database: ✅');
-    console.log('   Updated By:', req.user.email);
     console.log('=====================================================\n');
 
     // Create audit log

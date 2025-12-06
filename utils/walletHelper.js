@@ -19,8 +19,22 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
   if (!userId) {
     throw new Error('User ID is required for wallet balance update');
   }
+  
+  console.log(`\n   [updateWalletBalance] Starting wallet update...`);
+  console.log(`     User ID: ${userId}`);
+  console.log(`     Mode: ${mode}`);
+  console.log(`     Amount: ₹${amount}`);
+  console.log(`     Operation: ${operation}`);
+  console.log(`     Transaction Type: ${transactionType}`);
+  
   const wallet = await getOrCreateWallet(userId);
   const balanceField = `${mode.toLowerCase()}Balance`;
+  
+  console.log(`     Balance Field: ${balanceField}`);
+  console.log(`     Wallet BEFORE:`);
+  console.log(`       - ${balanceField}: ₹${wallet[balanceField] || 0}`);
+  console.log(`       - cashIn: ₹${wallet.cashIn || 0}`);
+  console.log(`       - cashOut: ₹${wallet.cashOut || 0}`);
   
   // Handle reversals (reverse cashIn and cashOut)
   if (transactionType === 'transaction_reversal' || 
@@ -40,12 +54,18 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
     }
   } else if (operation === 'add') {
     wallet[balanceField] += amount;
+    console.log(`     ✅ ${balanceField} increased by ₹${amount} → ₹${wallet[balanceField]}`);
+    
     // Update cashIn based on transaction type
     if (transactionType === 'collection' || 
         transactionType === 'add' || 
         transactionType === 'transaction_in' ||
         transactionType === 'expense_reimbursement') {
+      const oldCashIn = wallet.cashIn || 0;
       wallet.cashIn = (wallet.cashIn || 0) + amount;
+      console.log(`     ✅ cashIn increased by ₹${amount} (${oldCashIn} → ${wallet.cashIn})`);
+    } else {
+      console.log(`     ⚠️  cashIn NOT updated (transactionType: ${transactionType} not in collection/add/transaction_in/expense_reimbursement)`);
     }
   } else if (operation === 'subtract') {
     if (wallet[balanceField] < amount) {
@@ -61,6 +81,14 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
   }
   
   await wallet.save();
+  
+  console.log(`     Wallet AFTER:`);
+  console.log(`       - ${balanceField}: ₹${wallet[balanceField] || 0}`);
+  console.log(`       - cashIn: ₹${wallet.cashIn || 0}`);
+  console.log(`       - cashOut: ₹${wallet.cashOut || 0}`);
+  console.log(`       - totalBalance: ₹${wallet.totalBalance || 0}`);
+  console.log(`   [updateWalletBalance] ✅ Wallet update completed\n`);
+  
   return wallet;
 };
 

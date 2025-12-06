@@ -159,6 +159,8 @@ exports.createExpense = async (req, res) => {
 
         console.log(`✅ Auto-created expense type: ${normalizedCategoryName}`);
       } catch (error) {
+        console.error(`❌ Error creating expense type: ${normalizedCategoryName}`, error);
+        
         // Handle duplicate key error (race condition - category created by another request)
         if (error.code === 11000) {
           // Try to find the category again (race condition - category created by another request)
@@ -167,26 +169,52 @@ exports.createExpense = async (req, res) => {
           });
           
           if (!expenseType) {
-            throw new Error('Failed to create expense type. Please try again.');
+            console.error(`❌ Failed to find expense type after duplicate key error: ${normalizedCategoryName}`);
+            return res.status(500).json({
+              success: false,
+              message: 'Failed to create expense type. Please try again.'
+            });
           }
         } else {
-          throw error;
+          // For any other error, return proper error response
+          console.error(`❌ Unexpected error creating expense type: ${error.message}`);
+          return res.status(500).json({
+            success: false,
+            message: `Failed to create expense type: ${error.message || 'Unknown error'}. Please try again.`
+          });
         }
       }
     } else if (!expenseType.isActive) {
       // Reactivate inactive category
-      expenseType.isActive = true;
-      // Update name to match provided case if different
-      if (expenseType.name.toLowerCase() !== categoryNameLower) {
-        expenseType.name = categoryName.charAt(0).toUpperCase() + categoryName.slice(1).toLowerCase();
+      try {
+        expenseType.isActive = true;
+        // Update name to match provided case if different
+        if (expenseType.name.toLowerCase() !== categoryNameLower) {
+          expenseType.name = categoryName.charAt(0).toUpperCase() + categoryName.slice(1).toLowerCase();
+        }
+        await expenseType.save();
+
+        // Emit real-time update for expense type update
+        const { emitExpenseTypeUpdate } = require('../utils/socketService');
+        emitExpenseTypeUpdate('updated', expenseType.toObject());
+
+        console.log(`✅ Reactivated expense type: ${expenseType.name}`);
+      } catch (error) {
+        console.error(`❌ Error reactivating expense type: ${expenseType.name}`, error);
+        return res.status(500).json({
+          success: false,
+          message: `Failed to reactivate expense type: ${error.message || 'Unknown error'}. Please try again.`
+        });
       }
-      await expenseType.save();
+    }
 
-      // Emit real-time update for expense type update
-      const { emitExpenseTypeUpdate } = require('../utils/socketService');
-      emitExpenseTypeUpdate('updated', expenseType.toObject());
-
-      console.log(`✅ Reactivated expense type: ${expenseType.name}`);
+    // Validate expenseType exists before proceeding (safety check)
+    if (!expenseType || !expenseType.name) {
+      console.error(`❌ Expense type is null or invalid after processing: ${categoryName}`);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to process expense type. Please try again.'
+      });
     }
 
     // Use the category name from expense type (normalized)
@@ -251,45 +279,103 @@ exports.createExpense = async (req, res) => {
       expenseData.proofUrl = null;
     }
 
-    const expense = await Expense.create(expenseData);
+    // Create expense with proper error handling
+    let expense;
+    try {
+      expense = await Expense.create(expenseData);
+      
+      // Validate expense was created successfully
+      if (!expense || !expense._id) {
+        console.error(`❌ Expense creation failed - expense object is invalid`);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create expense. Please try again.'
+        });
+      }
+      
+      console.log(`✅ Expense created successfully: ${expense._id} for user ${targetUserId}`);
+    } catch (error) {
+      console.error(`❌ Error creating expense:`, error);
+      return res.status(500).json({
+        success: false,
+        message: `Failed to create expense: ${error.message || 'Unknown error'}. Please try again.`
+      });
+    }
 
-    await createAuditLog(
-      req.user._id,
-      `Created expense: ${amount} ${mode} for ${finalCategoryName}`,
-      'Create',
-      'Expense',
-      expense._id,
-      null,
-      expense.toObject(),
-      req.ip
-    );
+    // Create audit log with error handling
+    try {
+      await createAuditLog(
+        req.user._id,
+        `Created expense: ${amount} ${mode} for ${finalCategoryName}`,
+        'Create',
+        'Expense',
+        expense._id,
+        null,
+        expense.toObject(),
+        req.ip
+      );
+    } catch (auditError) {
+      // Log audit error but don't fail the request
+      console.error(`⚠️ Error creating audit log for expense ${expense._id}:`, auditError);
+    }
 
     // Emit real-time update for expense creation (to all connected clients)
-    const expenseUser = await User.findById(targetUserId);
-    await notifyAmountUpdate('expense_created', {
-      expenseId: expense._id,
-      userId: targetUserId,
-      userName: expenseUser?.name || 'Unknown',
-      amount,
-      mode,
-      category: finalCategoryName,
-      description,
-      status: 'Pending',
-      createdBy: req.user._id
-    });
+    // Wrap in try-catch to prevent socket errors from failing the request
+    try {
+      const expenseUser = await User.findById(targetUserId);
+      await notifyAmountUpdate('expense_created', {
+        expenseId: expense._id,
+        userId: targetUserId,
+        userName: expenseUser?.name || 'Unknown',
+        amount,
+        mode,
+        category: finalCategoryName,
+        description,
+        status: 'Pending',
+        createdBy: req.user._id
+      });
+    } catch (socketError) {
+      console.error(`⚠️ Error emitting expense_created notification:`, socketError);
+      // Continue - don't fail the request for socket errors
+    }
     
     // Also emit specific expense event for real-time updates (for expense report)
-    const { emitExpenseUpdate } = require('../utils/socketService');
-    const expenseWithUser = await Expense.findById(expense._id).populate('userId createdBy');
-    emitExpenseUpdate('created', expenseWithUser?.toObject() || expense.toObject());
+    try {
+      const { emitExpenseUpdate } = require('../utils/socketService');
+      const expenseWithUser = await Expense.findById(expense._id).populate('userId createdBy');
+      emitExpenseUpdate('created', expenseWithUser?.toObject() || expense.toObject());
+    } catch (socketError) {
+      console.error(`⚠️ Error emitting expense update:`, socketError);
+      // Continue - don't fail the request for socket errors
+    }
 
     // Emit expense report stats update for real-time report updates
-    await emitExpenseReportStatsUpdate();
+    try {
+      await emitExpenseReportStatsUpdate();
+    } catch (socketError) {
+      console.error(`⚠️ Error emitting expense report stats update:`, socketError);
+      // Continue - don't fail the request for socket errors
+    }
 
     // Emit dashboard summary update
-    const { emitDashboardSummaryUpdate } = require('../utils/socketService');
-    emitDashboardSummaryUpdate({ refresh: true });
+    try {
+      const { emitDashboardSummaryUpdate } = require('../utils/socketService');
+      emitDashboardSummaryUpdate({ refresh: true });
+    } catch (socketError) {
+      console.error(`⚠️ Error emitting dashboard summary update:`, socketError);
+      // Continue - don't fail the request for socket errors
+    }
 
+    // Final validation - ensure expense exists before sending response
+    if (!expense || !expense._id) {
+      console.error(`❌ Expense validation failed before sending response`);
+      return res.status(500).json({
+        success: false,
+        message: 'Expense was not created properly. Please try again.'
+      });
+    }
+
+    // Send success response
     res.status(201).json({
       success: true,
       message: 'Expense created successfully',
@@ -401,24 +487,8 @@ exports.approveExpense = async (req, res) => {
       });
     }
 
-    // Get creator info
-    const creator = await User.findById(expense.createdBy);
-    const isCreatedBySuperAdmin = creator?.role === 'SuperAdmin';
-    
-    // Check authorization: Admin/SuperAdmin can always approve, or receiver (userId) can approve if created by Super Admin
-    const isReceiver = expenseUserId.toString() === req.user._id.toString();
-    
-    // Check if user has Smart Approvals permission to approve expenses
-    const hasSmartApprovalsPerm = !isAdminOrSuperAdmin 
-      ? await hasSmartApprovalsPermission(req.user._id, 'approve', 'expenses')
-      : false;
-    
-    if (!isAdminOrSuperAdmin && !hasSmartApprovalsPerm && !(isCreatedBySuperAdmin && isReceiver)) {
-      return res.status(403).json({
-        success: false,
-        message: 'You do not have permission to approve this expense. Only Admin/SuperAdmin, users with Smart Approvals permission, or the receiver (for expenses created by Super Admin) can approve expenses.'
-      });
-    }
+    // Authorization: ALL authenticated users can approve expenses (except self-approval which is already handled above)
+    // No additional permission check needed - any user can approve any expense (except their own)
 
     const userId = expenseUserId;
     const previousStatus = expense.status;
