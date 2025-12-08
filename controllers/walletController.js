@@ -2495,10 +2495,15 @@ exports.getSelfWalletReport = async (req, res) => {
     console.log('🔍 [SELF WALLET] Data fetched - Expenses:', allExpenses.length, ', Transactions:', allTransactions.length, ', Collections:', allCollections.length, ', WalletTransactions:', allWalletTransactions.length);
     
     // Calculate TOTAL cashIn from ALL data (always calculate, even if arrays are empty)
-      // 1. Wallet Transactions - Add operations
+      // 1. Wallet Transactions - Add operations (EXCLUDE expense-related ones to prevent double counting)
+      // Expense-related wallet transactions are excluded because the Expense document itself is counted separately
       allWalletTransactions.forEach(wt => {
         const isTransactionRelated = wt.type === 'transaction';
-        if (!isTransactionRelated && (wt.type === 'add' || wt.operation === 'add')) {
+        const isExpenseRelated = (wt.type === 'expense' || wt.relatedModel === 'Expense') && wt.relatedId;
+        
+        // Exclude transaction-related and expense-related wallet transactions
+        // Expense-related ones are excluded because the Expense document itself is counted separately (line 2584-2596)
+        if (!isTransactionRelated && !isExpenseRelated && (wt.type === 'add' || wt.operation === 'add')) {
           totalCashIn += toSafeNumber(wt.amount);
         }
       });
