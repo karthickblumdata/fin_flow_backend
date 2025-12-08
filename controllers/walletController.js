@@ -737,7 +737,7 @@ exports.getWalletReport = async (req, res) => {
 
     const expenseFilter = {};
     const transactionFilter = {};
-    const collectionFilter = {};
+    let collectionFilter = {}; // Use 'let' instead of 'const' to allow reassignment when adding Entry 2 filter
 
     if (Object.keys(dateRange).length) {
       expenseFilter.createdAt = { ...dateRange };
@@ -1084,6 +1084,56 @@ exports.getWalletReport = async (req, res) => {
     console.log('   Include Wallet Transactions:', includeWalletTransactions && walletTransactionFilter);
     console.log('');
 
+    // ========================================================================
+    // CRITICAL: Exclude Entry 1 collections at database query level
+    // ========================================================================
+    // Entry 1: isSystemCollection = false AND no parentCollectionId
+    // Entry 2: isSystemCollection = true AND has parentCollectionId
+    // Only Entry 2 should be queried because that's where wallet update happens
+    // This prevents double counting at the source (database level)
+    // ========================================================================
+    if (includeCollections) {
+      // Add filter to exclude Entry 1 (only fetch Entry 2)
+      // Entry 2 satisfies: isSystemCollection = true OR parentCollectionId exists
+      // Handle existing $or in collectionFilter properly
+      if (collectionFilter.$or && Array.isArray(collectionFilter.$or) && collectionFilter.$or.length > 0) {
+        // collectionFilter already has $or - combine with $and
+        const existingOr = [...collectionFilter.$or];
+        const otherFilters = { ...collectionFilter };
+        delete otherFilters.$or;
+        collectionFilter = {
+          $and: [
+            otherFilters,
+            {
+              $or: [
+                ...existingOr,
+                { isSystemCollection: true }, // Entry 2: system collection
+                { parentCollectionId: { $exists: true, $ne: null } } // Entry 2: has parentCollectionId
+              ]
+            }
+          ]
+        };
+      } else {
+        // No existing $or - combine paymentModeId (if exists) with Entry 2 filter using $and
+        // This ensures: paymentModeId matches AND (isSystemCollection OR parentCollectionId exists)
+        const otherFilters = { ...collectionFilter };
+        collectionFilter = {
+          $and: [
+            otherFilters,
+            {
+              $or: [
+                { isSystemCollection: true }, // Entry 2: system collection
+                { parentCollectionId: { $exists: true, $ne: null } } // Entry 2: has parentCollectionId
+              ]
+            }
+          ]
+        };
+      }
+      console.log('🔍 [WALLET REPORT] Added Entry 1 exclusion filter to collection query');
+      console.log('   Will only fetch Entry 2 (system collections) from database');
+      console.log('   Final collectionFilter:', JSON.stringify(collectionFilter, null, 2));
+    }
+
     const [expenses, transactions, collections, walletTransactions] = await Promise.all([
       includeExpenses
         ? Expense.find(expenseFilter)
@@ -1227,38 +1277,37 @@ exports.getWalletReport = async (req, res) => {
     const transformedCollections = collections
       .map(col => {
         // ========================================================================
-        // CRITICAL: Prevent double counting for account reports
+        // CRITICAL: Prevent double counting for ALL wallet reports
         // ========================================================================
         // When a collection is approved, two entries are created:
         // - Entry 1: Original collection (isSystemCollection = false, no parentCollectionId)
         // - Entry 2: System collection (isSystemCollection = true, has parentCollectionId)
         // 
         // The wallet is updated ONLY in Entry 2, so Entry 1 should NOT be counted
-        // in account reports to prevent double counting.
+        // in ANY wallet report (account reports OR all wallet reports) to prevent double counting.
         // 
         // This applies to ALL collections (both AutoPay enabled and disabled):
         // - AutoPay enabled + Cash mode: Entry 2 is created (normal flow)
         // - AutoPay enabled + Non-Cash mode: Entry 2 is created (AutoPay flow)
         // - AutoPay disabled: Entry 2 is created (normal flow)
         // 
-        // For account reports (accountId filter), we should only count Entry 2
-        // (system collections) and exclude Entry 1 (original collections).
+        // For ALL wallet reports (with or without accountId filter), we should only
+        // count Entry 2 (system collections) and exclude Entry 1 (original collections).
         // ========================================================================
-        if (accountId) {
-          // Check if this is Entry 1 (should be excluded to prevent double counting)
-          const isSystemCollection = col.isSystemCollection === true;
-          const hasParentCollection = !!col.parentCollectionId;
-          
-          // Entry 1: NOT a system collection AND has no parentCollectionId
-          // Entry 2: IS a system collection AND has parentCollectionId
-          if (!isSystemCollection && !hasParentCollection) {
-            // This is Entry 1 - exclude it to prevent double counting
-            // Only Entry 2 (system collection) should be counted because
-            // that's where the wallet update actually happens
-            excludedCollectionsCount++;
-            console.log(`   ⏭️  [ACCOUNT REPORT] Excluding Entry 1 (Voucher: ${col.voucherNumber || col._id}) - Entry 2 will be counted instead`);
-            return null; // Exclude Entry 1
-          }
+        // Check if this is Entry 1 (should be excluded to prevent double counting)
+        const isSystemCollection = col.isSystemCollection === true;
+        const hasParentCollection = !!col.parentCollectionId;
+        
+        // Entry 1: NOT a system collection AND has no parentCollectionId
+        // Entry 2: IS a system collection AND has parentCollectionId
+        if (!isSystemCollection && !hasParentCollection) {
+          // This is Entry 1 - exclude it to prevent double counting
+          // Only Entry 2 (system collection) should be counted because
+          // that's where the wallet update actually happens
+          excludedCollectionsCount++;
+          const reportType = accountId ? 'ACCOUNT REPORT' : 'ALL WALLET REPORT';
+          console.log(`   ⏭️  [${reportType}] Excluding Entry 1 (Voucher: ${col.voucherNumber || col._id}) - Entry 2 will be counted instead`);
+          return null; // Exclude Entry 1
         }
         
         // ========================================================================
@@ -1368,14 +1417,15 @@ exports.getWalletReport = async (req, res) => {
       })
       .filter(col => col !== null); // Remove null entries (collections that don't match)
     
+    console.log(`✅ [WALLET REPORT] Collections filtering complete:`);
+    console.log(`   Total collections queried: ${collections.length}`);
+    console.log(`   Included collections (Entry 2 only): ${includedCollectionsCount}`);
+    console.log(`   Excluded collections (Entry 1 + others): ${excludedCollectionsCount}`);
+    console.log(`   Final transformed collections: ${transformedCollections.length}`);
+    console.log(`   [NOTE: Entry 1 collections are excluded to prevent double counting]`);
+    console.log(`   [NOTE: Only Entry 2 (system collections) are counted in all wallet reports]`);
     if (accountId) {
-      console.log(`✅ [WALLET REPORT] Collections filtering complete:`);
-      console.log(`   Total collections queried: ${collections.length}`);
-      console.log(`   Included collections (Entry 2 only): ${includedCollectionsCount}`);
-      console.log(`   Excluded collections (Entry 1 + others): ${excludedCollectionsCount}`);
-      console.log(`   Final transformed collections: ${transformedCollections.length}`);
-      console.log(`   [NOTE: Entry 1 collections are excluded to prevent double counting]`);
-      console.log(`   [NOTE: Only Entry 2 (system collections) are counted in account reports]`);
+      console.log(`   [NOTE: Additionally filtered by accountId: ${accountId}]`);
     }
 
     // Transform WalletTransactions (only for All Accounts Report)
