@@ -1019,10 +1019,12 @@ exports.getWalletReport = async (req, res) => {
     }
 
     // Include WalletTransactions for:
-    // 1. All Accounts Report (when targetUserId/targetUserIds is provided)
+    // 1. All Accounts Report (no filters) - include ALL wallet transactions
     // 2. Self Wallet (when targetUserId/targetUserIds is provided)
-    // 3. Account Reports (when accountId is provided - to show Add Amount/Withdraw for specific account)
-    const includeWalletTransactions = (!targetUserId && !targetUserIds && !accountId) ? false : true;
+    // 3. Account Reports (when accountId is provided - filtered by accountId)
+    // 4. Multiple users / Role filter (when targetUserIds/roleFilteredUserIds is provided)
+    // Always include wallet transactions - filter by accountId if provided, otherwise include all
+    const includeWalletTransactions = true;
     
     const walletTransactionFilter = includeWalletTransactions ? {
       type: { $in: ['add', 'withdraw', 'transaction'] },
@@ -1603,13 +1605,14 @@ exports.getWalletReport = async (req, res) => {
     let cashOut = 0;
 
     // Add wallet transactions to cash flow
-    // Note: For account filtering, wallet transactions are counted here
+    // Note: For "All Accounts" view (no accountId, no user filters), wallet transactions are counted here
+    // For account filter view, wallet transactions are counted in combined.forEach loop (they're filtered by accountId)
     // For self wallet, multiple users, and role filtering, wallet transactions are counted in the combined.forEach loop
     // to avoid double counting
-    if (includeWalletTransactions && walletTransactions && !targetUserId && !targetUserIds && !roleFilteredUserIds) {
+    if (includeWalletTransactions && walletTransactions && !targetUserId && !targetUserIds && !roleFilteredUserIds && !accountId) {
       // Count wallet transactions here for:
-      // - All Accounts view (no filters)
-      // - Account filter view (accountId set)
+      // - All Accounts view (no filters, no accountId)
+      // When accountId is set, wallet transactions are filtered and counted in combined.forEach loop
       // Self wallet, multiple users, and role filter wallet transactions are counted in combined.forEach loop
       walletTransactions.forEach(wt => {
         const amount = toSafeNumber(wt.amount);
@@ -1848,13 +1851,29 @@ exports.getWalletReport = async (req, res) => {
               }
             }
           } else {
-            // For "all users" view: Wallet transactions are already counted in initial values
-            // (from walletTransactions array before the combined loop)
-            // But we still track them in the breakdown for debugging
-            if (walletTransactionType === 'add' || (walletTransactionType === 'transaction' && item.operation === 'add')) {
-              walletTxnCashIn += amount;
-            } else if (walletTransactionType === 'withdraw' || (walletTransactionType === 'transaction' && item.operation === 'subtract')) {
-              walletTxnCashOut += amount;
+            // For "all users" view OR account filter view:
+            // - If accountId is set: Wallet transactions are in combined array and should be counted here
+            //   (they were filtered by accountId, so they're not in initial walletTransactions array)
+            // - If no accountId: Wallet transactions are already counted in initial values
+            //   (from walletTransactions array before the combined loop)
+            if (accountId) {
+              // Account filter view: Count wallet transactions from combined array
+              // These are filtered by accountId and are in the combined array
+              if (walletTransactionType === 'add' || (walletTransactionType === 'transaction' && item.operation === 'add')) {
+                cashIn += amount;
+                walletTxnCashIn += amount;
+              } else if (walletTransactionType === 'withdraw' || (walletTransactionType === 'transaction' && item.operation === 'subtract')) {
+                cashOut += amount;
+                walletTxnCashOut += amount;
+              }
+            } else {
+              // All users view (no accountId): Wallet transactions already counted in initial values
+              // Just track them in the breakdown for debugging
+              if (walletTransactionType === 'add' || (walletTransactionType === 'transaction' && item.operation === 'add')) {
+                walletTxnCashIn += amount;
+              } else if (walletTransactionType === 'withdraw' || (walletTransactionType === 'transaction' && item.operation === 'subtract')) {
+                walletTxnCashOut += amount;
+              }
             }
           }
         }
