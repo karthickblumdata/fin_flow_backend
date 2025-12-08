@@ -39,33 +39,59 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
   // Handle reversals (reverse cashIn and cashOut)
   if (transactionType === 'transaction_reversal' || 
       transactionType === 'expense_reversal' || 
-      transactionType === 'collection_reversal') {
+      transactionType === 'collection_reversal' ||
+      transactionType === 'collection_rejection') {
     if (operation === 'add') {
       // Reversing transaction_out/expense: Add balance back and SUBTRACT from cashOut
       wallet[balanceField] += amount;
       wallet.cashOut = Math.max(0, (wallet.cashOut || 0) - amount);
     } else if (operation === 'subtract') {
       // Reversing transaction_in/collection/expense_reimbursement: Subtract balance and SUBTRACT from cashIn
-      if (wallet[balanceField] < amount) {
-        throw new Error(`Insufficient ${mode} balance`);
+      // Special case: If this was an AutoPay collector transaction, also reverse cashOut
+      const wasAutoPayCollector = wallet.cashOut >= amount && wallet.cashIn >= amount;
+      if (wasAutoPayCollector && transactionType === 'collection_reversal') {
+        // Reversing AutoPay collector: Subtract both cashIn and cashOut
+        wallet.cashIn = Math.max(0, (wallet.cashIn || 0) - amount);
+        wallet.cashOut = Math.max(0, (wallet.cashOut || 0) - amount);
+        // Balance NOT changed (was unchanged originally)
+        console.log(`     ✅ Reversing AutoPay collector: cashIn -₹${amount}, cashOut -₹${amount}, balance unchanged`);
+      } else {
+        // Normal reversal: Subtract balance and cashIn
+        if (wallet[balanceField] < amount) {
+          throw new Error(`Insufficient ${mode} balance`);
+        }
+        wallet[balanceField] -= amount;
+        wallet.cashIn = Math.max(0, (wallet.cashIn || 0) - amount);
       }
-      wallet[balanceField] -= amount;
-      wallet.cashIn = Math.max(0, (wallet.cashIn || 0) - amount);
     }
   } else if (operation === 'add') {
-    wallet[balanceField] += amount;
-    console.log(`     ✅ ${balanceField} increased by ₹${amount} → ₹${wallet[balanceField]}`);
-    
-    // Update cashIn based on transaction type
-    if (transactionType === 'collection' || 
-        transactionType === 'add' || 
-        transactionType === 'transaction_in' ||
-        transactionType === 'expense_reimbursement') {
+    // Special case: collection_autopay_collector - collector receives and transfers (cashIn + cashOut, balance unchanged)
+    if (transactionType === 'collection_autopay_collector') {
+      // Collector: cashIn increases, cashOut increases, balance unchanged
       const oldCashIn = wallet.cashIn || 0;
+      const oldCashOut = wallet.cashOut || 0;
       wallet.cashIn = (wallet.cashIn || 0) + amount;
+      wallet.cashOut = (wallet.cashOut || 0) + amount;
+      // Balance NOT updated (cashIn - cashOut = 0 net effect)
       console.log(`     ✅ cashIn increased by ₹${amount} (${oldCashIn} → ${wallet.cashIn})`);
+      console.log(`     ✅ cashOut increased by ₹${amount} (${oldCashOut} → ${wallet.cashOut})`);
+      console.log(`     ⚠️  ${balanceField} NOT updated (AutoPay collector - balance unchanged)`);
     } else {
-      console.log(`     ⚠️  cashIn NOT updated (transactionType: ${transactionType} not in collection/add/transaction_in/expense_reimbursement)`);
+      // Normal case: balance increases
+      wallet[balanceField] += amount;
+      console.log(`     ✅ ${balanceField} increased by ₹${amount} → ₹${wallet[balanceField]}`);
+      
+      // Update cashIn based on transaction type
+      if (transactionType === 'collection' || 
+          transactionType === 'add' || 
+          transactionType === 'transaction_in' ||
+          transactionType === 'expense_reimbursement') {
+        const oldCashIn = wallet.cashIn || 0;
+        wallet.cashIn = (wallet.cashIn || 0) + amount;
+        console.log(`     ✅ cashIn increased by ₹${amount} (${oldCashIn} → ${wallet.cashIn})`);
+      } else {
+        console.log(`     ⚠️  cashIn NOT updated (transactionType: ${transactionType} not in collection/add/transaction_in/expense_reimbursement)`);
+      }
     }
   } else if (operation === 'subtract') {
     if (wallet[balanceField] < amount) {

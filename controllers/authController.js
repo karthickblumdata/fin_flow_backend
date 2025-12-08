@@ -72,13 +72,15 @@ exports.login = async (req, res) => {
       });
     }
 
-    // Auto-verify user if password is correct (for existing users)
-    // This allows users to login even if email verification failed
+    // Check if user account is active (isVerified = true)
+    // Only active users can login
     if (!user.isVerified) {
-      console.log(`⚠️  User not verified, auto-verifying after successful login - ${email}`);
-      user.isVerified = true;
-      await user.save({ validateBeforeSave: false });
-      console.log(`✅ User auto-verified: ${email}`);
+      console.log(`❌ Login Failed: User account is inactive - ${normalizedEmail}`);
+      console.log(`   User Status: Inactive (isVerified: ${user.isVerified})`);
+      return res.status(403).json({
+        success: false,
+        message: 'Your account is inactive. Please contact administrator to activate your account.'
+      });
     }
 
     const token = generateToken(user._id);

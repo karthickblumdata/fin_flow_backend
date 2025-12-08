@@ -104,12 +104,13 @@ exports.createCollection = async (req, res) => {
     }
 
     // Get receiver user to check active status
-    const receiverUser = await User.findById(receiverId);
+    // If receiver doesn't exist, fallback to collector (logged-in user) instead of showing error
+    let receiverUser = await User.findById(receiverId);
     if (!receiverUser) {
-      return res.status(404).json({
-        success: false,
-        message: 'Receiver user not found'
-      });
+      // Receiver not found - fallback to collector (logged-in user)
+      console.log(`[Collection Creation] Receiver user not found (ID: ${receiverId}), falling back to collector: ${req.user.email}`);
+      receiverId = req.user._id;
+      receiverUser = req.user; // Use logged-in user as receiver
     }
 
     // Check if receiver is active
@@ -318,32 +319,40 @@ exports.approveCollection = async (req, res) => {
     // Check if approver is different from collector
     const isApproverDifferentFromCollector = approverUserId.toString() !== collectedByUserId.toString();
     
-    // AutoPay only works if there's an assigned receiver
-    const hasAssignedReceiver = assignedReceiverUserId && 
-                                 assignedReceiverUserId.toString() !== '' && 
-                                 assignedReceiverUserId.toString() !== 'null';
+    // Get ORIGINAL assigned receiver from payment mode (not from collection)
+    // When AutoPay is enabled, collection.assignedReceiver = collector, but we need the original assigned user
+    const paymentMode = collection.paymentModeId;
+    const originalAssignedReceiverId = paymentMode?.assignedReceiver
+      ? (typeof paymentMode.assignedReceiver === 'object' && paymentMode.assignedReceiver._id
+         ? paymentMode.assignedReceiver._id
+         : paymentMode.assignedReceiver)
+      : null;
     
     // Check AutoPay conditions
-    const autoPayEnabled = collection.paymentModeId?.autoPay === true;
+    const autoPayEnabled = paymentMode?.autoPay === true;
     const isNonCashMode = collection.mode !== 'Cash';
-    const canRunAutoPay = autoPayEnabled && isNonCashMode && hasAssignedReceiver;
+    const hasOriginalAssignedReceiver = originalAssignedReceiverId && 
+                                        originalAssignedReceiverId.toString() !== '' && 
+                                        originalAssignedReceiverId.toString() !== 'null';
+    const canRunAutoPay = autoPayEnabled && isNonCashMode && hasOriginalAssignedReceiver;
     
     console.log(`\n[Collection Approval] Voucher: ${collection.voucherNumber}`);
     console.log(`   Collector (User1): ${collectedByUserId}`);
     console.log(`   Approver (User2): ${approverUserId}`);
-    console.log(`   Assigned Receiver: ${assignedReceiverUserId || 'None'}`);
-    console.log(`   AutoPay Enabled: ${autoPayEnabled}, Mode: ${collection.mode}, Has Receiver: ${hasAssignedReceiver}`);
+    console.log(`   Collection Assigned Receiver: ${assignedReceiverUserId || 'None'}`);
+    console.log(`   Original Assigned Receiver (from Payment Mode): ${originalAssignedReceiverId || 'None'}`);
+    console.log(`   AutoPay Enabled: ${autoPayEnabled}, Mode: ${collection.mode}, Has Original Receiver: ${hasOriginalAssignedReceiver}`);
     console.log(`   Will Run AutoPay: ${canRunAutoPay}`);
     
     // Determine who gets the money
-    // IMPORTANT: When AutoPay is enabled, money ALWAYS goes to collector (who collected the money)
+    // IMPORTANT: When AutoPay is enabled, money goes to original assigned receiver from payment mode
     // When AutoPay is disabled, money goes to assignedReceiver (if exists) or collector
     // NOTE: Approver can be anyone, but money goes based on AutoPay status
     let receiverUserId;
     if (autoPayEnabled && isNonCashMode) {
-      // AutoPay enabled: Money ALWAYS goes to collector (who collected the money)
-      receiverUserId = collectedByUserId;
-      console.log(`   ✅ AutoPay Enabled: Money will go to COLLECTOR (${collectedByUserId})`);
+      // AutoPay enabled: Money goes to original assigned receiver from payment mode
+      receiverUserId = originalAssignedReceiverId || collectedByUserId;
+      console.log(`   ✅ AutoPay Enabled: Money will go to ORIGINAL ASSIGNED RECEIVER (${receiverUserId})`);
     } else if (assignedReceiverUserId) {
       // AutoPay disabled: Money goes to assigned receiver
       receiverUserId = assignedReceiverUserId;
@@ -384,25 +393,45 @@ exports.approveCollection = async (req, res) => {
       
       // Entry 2: FROM collector TO receiver (based on AutoPay status)
       // FROM: Collection person name (collector) - who collected the money
-      // TO: When AutoPay enabled → collector, When AutoPay disabled → assignedReceiver
+      // TO: When AutoPay enabled → original assigned receiver, When AutoPay disabled → assignedReceiver
       const entry2CollectedBy = collectedByUserId; // Collector (same as Entry 1)
-      // When AutoPay is enabled, receiver is collector. Otherwise, use assignedReceiver
-      const entry2AssignedReceiver = (autoPayEnabled && isNonCashMode) 
-        ? collectedByUserId  // AutoPay: receiver is collector
-        : (assignedReceiverUserId || collectedByUserId); // Normal: receiver is assignedReceiver or collector
+      // Entry 2's assignedReceiver: When AutoPay enabled, it's the original assigned receiver (who receives money)
+      // When AutoPay disabled, it's the assignedReceiver (normal flow)
+      const entry2AssignedReceiver = (autoPayEnabled && isNonCashMode && originalAssignedReceiverId)
+        ? originalAssignedReceiverId  // AutoPay: use original assigned receiver from payment mode
+        : (assignedReceiverUserId || collectedByUserId); // Normal: use assignedReceiver or collector
       
       const entry2VoucherNumber = generateVoucherNumber();
       
-      // Update wallet ONCE for Entry 2 - money goes to receiver (collector if AutoPay, assignedReceiver if not)
-      console.log(`\n   Step 1: Updating wallet for Entry 2 (ONLY wallet update)...`);
-      const receiverType = (autoPayEnabled && isNonCashMode) 
-        ? 'Collector (AutoPay)' 
-        : (receiverUserId === assignedReceiverUserId ? 'Assigned Receiver' : 'Collector');
-      console.log(`   Adding ₹${collection.amount} to ${receiverType}'s wallet (User ID: ${receiverUserId})`);
-      console.log(`   Transaction Type: 'collection' (should update cashIn)`);
-      const entry2Wallet = await updateWalletBalance(receiverUserId, collection.mode, collection.amount, 'add', 'collection');
-      
-      console.log(`   Wallet Updated - CashIn: ${entry2Wallet.cashIn}, CashOut: ${entry2Wallet.cashOut}, Balance: ${entry2Wallet.totalBalance} (+₹${collection.amount})`);
+      // Update wallets based on AutoPay status
+      let entry2Wallet;
+      if (autoPayEnabled && isNonCashMode && originalAssignedReceiverId) {
+        // AutoPay enabled: Only update Original Assigned Receiver's wallet
+        // Collector wallet NOT updated (collector just collects, doesn't keep money)
+        console.log(`\n   Step 1: AutoPay Enabled - Updating ONLY RECEIVER wallet...`);
+        console.log(`   Collector (User ${collectedByUserId}) wallet NOT updated - collector just collects money`);
+        
+        // Update Original Assigned Receiver's wallet (cashIn + balance)
+        console.log(`   Updating ORIGINAL ASSIGNED RECEIVER (User ${originalAssignedReceiverId}) wallet...`);
+        console.log(`     - cashIn: +₹${collection.amount}`);
+        console.log(`     - Balance: +₹${collection.amount}`);
+        entry2Wallet = await updateWalletBalance(
+          originalAssignedReceiverId, 
+          collection.mode, 
+          collection.amount, 
+          'add', 
+          'collection'
+        );
+        console.log(`     ✅ Original Assigned Receiver Wallet Updated - CashIn: ${entry2Wallet.cashIn}, CashOut: ${entry2Wallet.cashOut}, Balance: ${entry2Wallet.totalBalance} (+₹${collection.amount})`);
+      } else {
+        // AutoPay disabled: Single wallet update (normal flow)
+        console.log(`\n   Step 1: AutoPay Disabled - Updating ONE wallet...`);
+        const receiverType = (receiverUserId === assignedReceiverUserId ? 'Assigned Receiver' : 'Collector');
+        console.log(`   Adding ₹${collection.amount} to ${receiverType}'s wallet (User ID: ${receiverUserId})`);
+        console.log(`   Transaction Type: 'collection' (should update cashIn)`);
+        entry2Wallet = await updateWalletBalance(receiverUserId, collection.mode, collection.amount, 'add', 'collection');
+        console.log(`   Wallet Updated - CashIn: ${entry2Wallet.cashIn}, CashOut: ${entry2Wallet.cashOut}, Balance: ${entry2Wallet.totalBalance} (+₹${collection.amount})`);
+      }
       
       // Create Entry 2 (System Collection) - same from/to as Entry 1, same approver
       // FROM: Collection person name (collector) - who collected the money
@@ -463,7 +492,19 @@ exports.approveCollection = async (req, res) => {
 
     // Emit real-time update to super admin
     const collectedByUserObj = typeof collection.collectedBy === 'object' ? collection.collectedBy : null;
-    const assignedReceiverUserObj = typeof collection.assignedReceiver === 'object' ? collection.assignedReceiver : null;
+    // Use original assigned receiver for notifications (when AutoPay enabled) or collection assignedReceiver (when disabled)
+    const finalAssignedReceiverId = (autoPayEnabled && isNonCashMode && originalAssignedReceiverId) 
+      ? originalAssignedReceiverId 
+      : assignedReceiverUserId;
+    const assignedReceiverUserObj = finalAssignedReceiverId 
+      ? (typeof collection.assignedReceiver === 'object' ? collection.assignedReceiver : null)
+      : null;
+    // If AutoPay enabled, get original assigned receiver user object
+    let originalAssignedReceiverUserObj = null;
+    if (autoPayEnabled && isNonCashMode && originalAssignedReceiverId) {
+      const originalUser = await User.findById(originalAssignedReceiverId);
+      originalAssignedReceiverUserObj = originalUser ? { name: originalUser.name, email: originalUser.email } : null;
+    }
     
     await notifyAmountUpdate('collection', {
       collectionId: collection._id,
@@ -472,9 +513,11 @@ exports.approveCollection = async (req, res) => {
         userId: collectedByUserId,
         userName: collectedByUserObj?.name || 'Unknown'
       },
-      assignedReceiver: assignedReceiverUserId ? {
-        userId: assignedReceiverUserId,
-        userName: assignedReceiverUserObj?.name || 'Unknown'
+      assignedReceiver: finalAssignedReceiverId ? {
+        userId: finalAssignedReceiverId,
+        userName: (autoPayEnabled && isNonCashMode && originalAssignedReceiverUserObj) 
+          ? (originalAssignedReceiverUserObj.name || 'Unknown')
+          : (assignedReceiverUserObj?.name || 'Unknown')
       } : null,
       amount: collection.amount,
       mode: collection.mode,
@@ -498,31 +541,39 @@ exports.approveCollection = async (req, res) => {
 
     // Emit self wallet update to receiver (money added to their wallet via Entry 2)
     const { emitSelfWalletUpdate } = require('../utils/socketService');
+    // When AutoPay enabled, receiver is original assigned receiver. Otherwise, use receiverUserId
+    const finalReceiverUserId = (autoPayEnabled && isNonCashMode && originalAssignedReceiverId) 
+      ? originalAssignedReceiverId 
+      : receiverUserId;
     const receiverWallet = entry2Wallet; // Wallet that was updated (Entry 2)
-    // receiverUserId already declared above - this is who got the money
-    const finalReceiverUserId = receiverUserId; // Who got the money (Entry 2)
     
-    emitSelfWalletUpdate(finalReceiverUserId.toString(), {
-      type: 'collection_approved',
-      wallet: receiverWallet ? {
-        cashBalance: receiverWallet.cashBalance,
-        upiBalance: receiverWallet.upiBalance,
-        bankBalance: receiverWallet.bankBalance,
-        totalBalance: receiverWallet.totalBalance
-      } : null,
-      collection: {
-        id: entry2Collection._id, // Entry 2 collection ID
-        amount: collection.amount,
-        mode: collection.mode,
-        voucherNumber: entry2VoucherNumber, // Entry 2 voucher number
-        status: 'Approved'
-      },
-      cashIn: collection.amount,
-      operation: 'collection_received'
-    });
+    // Emit to original assigned receiver (when AutoPay enabled) or normal receiver
+    if (finalReceiverUserId && entry2Wallet) {
+      emitSelfWalletUpdate(finalReceiverUserId.toString(), {
+        type: 'collection_approved',
+        wallet: receiverWallet ? {
+          cashBalance: receiverWallet.cashBalance,
+          upiBalance: receiverWallet.upiBalance,
+          bankBalance: receiverWallet.bankBalance,
+          totalBalance: receiverWallet.totalBalance
+        } : null,
+        collection: {
+          id: entry2Collection._id, // Entry 2 collection ID
+          amount: collection.amount,
+          mode: collection.mode,
+          voucherNumber: entry2VoucherNumber, // Entry 2 voucher number
+          status: 'Approved'
+        },
+        cashIn: collection.amount,
+        operation: 'collection_received'
+      });
+    }
+    
+    // Collector wallet NOT updated when AutoPay enabled (collector just collects, doesn't keep money)
+    // No socket notification needed for collector
 
-    // Emit to collector if different from receiver
-    if (collectedByUserId.toString() !== finalReceiverUserId.toString()) {
+    // Emit to collector if different from receiver (for normal flow, not AutoPay)
+    if (!autoPayEnabled && collectedByUserId.toString() !== finalReceiverUserId.toString()) {
       emitSelfWalletUpdate(collectedByUserId.toString(), {
         type: 'collection_created',
         collection: {
@@ -612,26 +663,47 @@ exports.rejectCollection = async (req, res) => {
     // If collection was approved, reverse wallet changes before rejecting
     const wasApproved = collection.status === 'Approved' || collection.status === 'Accounted';
     if (wasApproved) {
-      // Find Entry 2 (system collection) to reverse wallet
-      const entry2 = await Collection.findOne({ parentCollectionId: collection._id, isSystemCollection: true });
-      if (entry2) {
-        // Determine receiver who got the money - use Entry 2's assignedReceiver (it has the correct receiver)
-        // Entry 2's assignedReceiver will be collector if AutoPay was enabled, or assignedReceiver if not
-        const entry2ReceiverId = entry2.assignedReceiver 
-          ? (typeof entry2.assignedReceiver === 'object' && entry2.assignedReceiver._id 
-             ? entry2.assignedReceiver._id 
-             : entry2.assignedReceiver)
-          : (assignedReceiverUserId || collectedByUserId); // Fallback to original logic
+      // Get original assigned receiver from payment mode
+      const paymentMode = await PaymentMode.findById(collection.paymentModeId);
+      const originalAssignedReceiverId = paymentMode?.assignedReceiver
+        ? (typeof paymentMode.assignedReceiver === 'object' && paymentMode.assignedReceiver._id
+           ? paymentMode.assignedReceiver._id
+           : paymentMode.assignedReceiver)
+        : null;
+      
+      // Check if AutoPay was enabled (only reverse receiver wallet, collector wallet not updated)
+      const autoPayWasEnabled = paymentMode?.autoPay === true && collection.mode !== 'Cash';
+      
+      if (autoPayWasEnabled && originalAssignedReceiverId) {
+        // AutoPay was enabled: Reverse only receiver wallet (collector wallet was not updated)
+        console.log(`[Collection Reject] AutoPay was enabled - Reversing ONLY RECEIVER wallet...`);
+        console.log(`   Collector wallet NOT reversed (collector wallet was not updated during approval)`);
         
-        if (entry2ReceiverId) {
-          // Reverse wallet: subtract the amount that was added
-          await updateWalletBalance(entry2ReceiverId, collection.mode, collection.amount, 'subtract', 'collection_rejection');
-          console.log(`[Collection Reject] Reversed wallet: -₹${collection.amount} from receiver (${entry2ReceiverId})`);
+        // Reverse Original Assigned Receiver's wallet (cashIn - amount, balance - amount)
+        console.log(`   Reversing ORIGINAL ASSIGNED RECEIVER (User ${originalAssignedReceiverId}) wallet...`);
+        await updateWalletBalance(originalAssignedReceiverId, collection.mode, collection.amount, 'subtract', 'collection_reversal');
+        console.log(`   ✅ Original Assigned Receiver wallet reversed`);
+      } else {
+        // AutoPay was disabled: Reverse single wallet (normal flow)
+        const entry2 = await Collection.findOne({ parentCollectionId: collection._id, isSystemCollection: true });
+        if (entry2) {
+          // Determine receiver who got the money - use Entry 2's assignedReceiver
+          const entry2ReceiverId = entry2.assignedReceiver 
+            ? (typeof entry2.assignedReceiver === 'object' && entry2.assignedReceiver._id 
+               ? entry2.assignedReceiver._id 
+               : entry2.assignedReceiver)
+            : (assignedReceiverUserId || collectedByUserId); // Fallback to original logic
+          
+          if (entry2ReceiverId) {
+            // Reverse wallet: subtract the amount that was added
+            await updateWalletBalance(entry2ReceiverId, collection.mode, collection.amount, 'subtract', 'collection_rejection');
+            console.log(`[Collection Reject] Reversed wallet: -₹${collection.amount} from receiver (${entry2ReceiverId})`);
+          }
+          
+          // Delete Entry 2
+          await entry2.deleteOne();
+          console.log(`[Collection Reject] Deleted Entry 2: ${entry2._id}`);
         }
-        
-        // Delete Entry 2
-        await entry2.deleteOne();
-        console.log(`[Collection Reject] Deleted Entry 2: ${entry2._id}`);
       }
     }
 
@@ -983,7 +1055,8 @@ exports.restoreCollection = async (req, res) => {
   try {
     const collection = await Collection.findById(req.params.id)
       .populate('collectedBy')
-      .populate('assignedReceiver');
+      .populate('assignedReceiver')
+      .populate('paymentModeId');
 
     if (!collection) {
       return res.status(404).json({
@@ -1007,29 +1080,55 @@ exports.restoreCollection = async (req, res) => {
     // If collection was approved, reverse wallet changes before unapproving
     const wasApproved = collection.status === 'Approved' || collection.status === 'Accounted';
     if (wasApproved) {
-      // Find Entry 2 (system collection) to reverse wallet
-      const entry2 = await Collection.findOne({ parentCollectionId: collection._id, isSystemCollection: true });
-      if (entry2) {
-        // Determine receiver who got the money
-        const assignedReceiverUserId = collection.assignedReceiver 
-          ? (typeof collection.assignedReceiver === 'object' && collection.assignedReceiver._id 
-             ? collection.assignedReceiver._id 
-             : collection.assignedReceiver)
-          : (collection.collectedBy 
-             ? (typeof collection.collectedBy === 'object' && collection.collectedBy._id 
-                ? collection.collectedBy._id 
-                : collection.collectedBy)
-             : null);
+      // Get original assigned receiver from payment mode
+      const paymentMode = collection.paymentModeId;
+      const originalAssignedReceiverId = paymentMode?.assignedReceiver
+        ? (typeof paymentMode.assignedReceiver === 'object' && paymentMode.assignedReceiver._id
+           ? paymentMode.assignedReceiver._id
+           : paymentMode.assignedReceiver)
+        : null;
+      
+      // Check if AutoPay was enabled (only reverse receiver wallet, collector wallet not updated)
+      const autoPayWasEnabled = paymentMode?.autoPay === true && collection.mode !== 'Cash';
+      
+      if (autoPayWasEnabled && originalAssignedReceiverId) {
+        // AutoPay was enabled: Reverse only receiver wallet (collector wallet was not updated)
+        console.log(`[Collection Unapprove] AutoPay was enabled - Reversing ONLY RECEIVER wallet...`);
+        console.log(`   Collector wallet NOT reversed (collector wallet was not updated during approval)`);
         
-        if (assignedReceiverUserId) {
-          // Reverse wallet: subtract the amount that was added
-          await updateWalletBalance(assignedReceiverUserId, collection.mode, collection.amount, 'subtract', 'collection_reversal');
-          console.log(`[Collection Unapprove] Reversed wallet: -₹${collection.amount} from receiver`);
+        // Reverse Original Assigned Receiver's wallet (cashIn - amount, balance - amount)
+        console.log(`   Reversing ORIGINAL ASSIGNED RECEIVER (User ${originalAssignedReceiverId}) wallet...`);
+        await updateWalletBalance(originalAssignedReceiverId, collection.mode, collection.amount, 'subtract', 'collection_reversal');
+        console.log(`   ✅ Original Assigned Receiver wallet reversed`);
+      } else {
+        // AutoPay was disabled: Reverse single wallet (normal flow)
+        const entry2 = await Collection.findOne({ parentCollectionId: collection._id, isSystemCollection: true });
+        if (entry2) {
+          // Determine receiver who got the money - use Entry 2's assignedReceiver
+          const entry2ReceiverId = entry2.assignedReceiver 
+            ? (typeof entry2.assignedReceiver === 'object' && entry2.assignedReceiver._id 
+               ? entry2.assignedReceiver._id 
+               : entry2.assignedReceiver)
+            : (collection.assignedReceiver 
+               ? (typeof collection.assignedReceiver === 'object' && collection.assignedReceiver._id 
+                  ? collection.assignedReceiver._id 
+                  : collection.assignedReceiver)
+               : (collection.collectedBy 
+                  ? (typeof collection.collectedBy === 'object' && collection.collectedBy._id 
+                     ? collection.collectedBy._id 
+                     : collection.collectedBy)
+                  : null));
+          
+          if (entry2ReceiverId) {
+            // Reverse wallet: subtract the amount that was added
+            await updateWalletBalance(entry2ReceiverId, collection.mode, collection.amount, 'subtract', 'collection_reversal');
+            console.log(`[Collection Unapprove] Reversed wallet: -₹${collection.amount} from receiver (${entry2ReceiverId})`);
+          }
+          
+          // Delete Entry 2
+          await entry2.deleteOne();
+          console.log(`[Collection Unapprove] Deleted Entry 2: ${entry2._id}`);
         }
-        
-        // Delete Entry 2
-        await entry2.deleteOne();
-        console.log(`[Collection Unapprove] Deleted Entry 2: ${entry2._id}`);
       }
     }
 
@@ -1069,7 +1168,8 @@ exports.deleteCollection = async (req, res) => {
   try {
     const collection = await Collection.findById(req.params.id)
       .populate('collectedBy')
-      .populate('assignedReceiver');
+      .populate('assignedReceiver')
+      .populate('paymentModeId');
 
     if (!collection) {
       return res.status(404).json({
@@ -1097,29 +1197,69 @@ exports.deleteCollection = async (req, res) => {
     // If collection was approved, reverse wallet changes before deleting
     const wasApproved = collection.status === 'Approved' || collection.status === 'Accounted';
     if (wasApproved) {
-      // Find Entry 2 (system collection) to reverse wallet
-      const entry2 = await Collection.findOne({ parentCollectionId: collection._id, isSystemCollection: true });
-      if (entry2) {
-        // Determine receiver who got the money
-        const assignedReceiverUserId = collection.assignedReceiver 
-          ? (typeof collection.assignedReceiver === 'object' && collection.assignedReceiver._id 
-             ? collection.assignedReceiver._id 
-             : collection.assignedReceiver)
-          : (collection.collectedBy 
-             ? (typeof collection.collectedBy === 'object' && collection.collectedBy._id 
-                ? collection.collectedBy._id 
-                : collection.collectedBy)
-             : null);
+      // Get original assigned receiver from payment mode
+      const paymentMode = collection.paymentModeId;
+      const originalAssignedReceiverId = paymentMode?.assignedReceiver
+        ? (typeof paymentMode.assignedReceiver === 'object' && paymentMode.assignedReceiver._id
+           ? paymentMode.assignedReceiver._id
+           : paymentMode.assignedReceiver)
+        : null;
+      
+      // Check if AutoPay was enabled (need to reverse both collector and receiver wallets)
+      const autoPayWasEnabled = paymentMode?.autoPay === true && collection.mode !== 'Cash';
+      
+      if (autoPayWasEnabled && originalAssignedReceiverId) {
+        // AutoPay was enabled: Reverse both wallets
+        console.log(`[Collection Delete] AutoPay was enabled - Reversing TWO wallets...`);
         
-        if (assignedReceiverUserId) {
-          // Reverse wallet: subtract the amount that was added
-          await updateWalletBalance(assignedReceiverUserId, collection.mode, collection.amount, 'subtract', 'collection_deletion');
-          console.log(`[Collection Delete] Reversed wallet: -₹${collection.amount} from receiver`);
+        // Reverse Collector's wallet (cashIn - amount, cashOut - amount)
+        console.log(`   Reversing COLLECTOR (User ${collection.collectedBy?._id || collection.collectedBy}) wallet...`);
+        const collectedByUserId = collection.collectedBy?._id || collection.collectedBy;
+        if (collectedByUserId) {
+          await updateWalletBalance(collectedByUserId, collection.mode, collection.amount, 'subtract', 'collection_reversal');
+          console.log(`   ✅ Collector wallet reversed`);
         }
         
-        // Delete Entry 2
-        await entry2.deleteOne();
-        console.log(`[Collection Delete] Deleted Entry 2: ${entry2._id}`);
+        // Reverse Original Assigned Receiver's wallet (cashIn - amount, balance - amount)
+        console.log(`   Reversing ORIGINAL ASSIGNED RECEIVER (User ${originalAssignedReceiverId}) wallet...`);
+        await updateWalletBalance(originalAssignedReceiverId, collection.mode, collection.amount, 'subtract', 'collection_reversal');
+        console.log(`   ✅ Original Assigned Receiver wallet reversed`);
+        
+        // Delete Entry 2 if exists
+        const entry2 = await Collection.findOne({ parentCollectionId: collection._id, isSystemCollection: true });
+        if (entry2) {
+          await entry2.deleteOne();
+          console.log(`[Collection Delete] Deleted Entry 2: ${entry2._id}`);
+        }
+      } else {
+        // AutoPay was disabled: Reverse single wallet (normal flow)
+        const entry2 = await Collection.findOne({ parentCollectionId: collection._id, isSystemCollection: true });
+        if (entry2) {
+          // Determine receiver who got the money - use Entry 2's assignedReceiver
+          const entry2ReceiverId = entry2.assignedReceiver 
+            ? (typeof entry2.assignedReceiver === 'object' && entry2.assignedReceiver._id 
+               ? entry2.assignedReceiver._id 
+               : entry2.assignedReceiver)
+            : (collection.assignedReceiver 
+               ? (typeof collection.assignedReceiver === 'object' && collection.assignedReceiver._id 
+                  ? collection.assignedReceiver._id 
+                  : collection.assignedReceiver)
+               : (collection.collectedBy 
+                  ? (typeof collection.collectedBy === 'object' && collection.collectedBy._id 
+                     ? collection.collectedBy._id 
+                     : collection.collectedBy)
+                  : null));
+          
+          if (entry2ReceiverId) {
+            // Reverse wallet: subtract the amount that was added
+            await updateWalletBalance(entry2ReceiverId, collection.mode, collection.amount, 'subtract', 'collection_deletion');
+            console.log(`[Collection Delete] Reversed wallet: -₹${collection.amount} from receiver (${entry2ReceiverId})`);
+          }
+          
+          // Delete Entry 2
+          await entry2.deleteOne();
+          console.log(`[Collection Delete] Deleted Entry 2: ${entry2._id}`);
+        }
       }
     }
 

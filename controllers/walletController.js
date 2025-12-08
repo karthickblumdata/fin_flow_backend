@@ -466,7 +466,8 @@ exports.getAllWallets = async (req, res) => {
     const walletsWithUser = await Promise.all(wallets.map(async (wallet) => {
       const user = wallet.userId;
       const userId = user?._id;
-      const isActive = user && (user.isVerified === true || wallet.totalBalance > 0);
+      // User status is determined solely by isVerified, not by wallet balance
+      const isActive = user && user.isVerified === true;
       
       let flaggedCount = 0;
       let unapprovedCount = 0;
@@ -769,7 +770,13 @@ exports.getWalletReport = async (req, res) => {
     let selectedPaymentMode = null;
     let accountModeType = null;
     if (accountId) {
+      console.log('═══════════════════════════════════════════════════════════');
+      console.log('🔍 [WALLET REPORT] AccountId filter detected!');
+      console.log('   accountId:', accountId);
+      console.log('   Validating accountId format...');
+      
       if (!mongoose.Types.ObjectId.isValid(accountId)) {
+        console.log('❌ [WALLET REPORT] Invalid accountId format:', accountId);
         return res.status(400).json({
           success: false,
           message: 'Invalid accountId provided'
@@ -777,10 +784,16 @@ exports.getWalletReport = async (req, res) => {
       }
 
       try {
+        console.log('✅ [WALLET REPORT] accountId format is valid, fetching PaymentMode...');
         const PaymentMode = require('../models/paymentModeModel');
         selectedPaymentMode = await PaymentMode.findById(accountId);
         
         if (selectedPaymentMode) {
+          console.log('✅ [WALLET REPORT] PaymentMode found:');
+          console.log('   _id:', selectedPaymentMode._id.toString());
+          console.log('   modeName:', selectedPaymentMode.modeName);
+          console.log('   description:', selectedPaymentMode.description || 'N/A');
+          console.log('   isActive:', selectedPaymentMode.isActive);
           // ========================================================================
           // COLLECTIONS FILTERING - Exact paymentModeId match
           // ========================================================================
@@ -795,6 +808,9 @@ exports.getWalletReport = async (req, res) => {
           // MongoDB ObjectId match automatically excludes null/undefined values
           // We use exact ObjectId match to ensure complete separation between accounts
           collectionFilter.paymentModeId = new mongoose.Types.ObjectId(accountId);
+          console.log('✅ [WALLET REPORT] Collections filter applied:');
+          console.log('   collectionFilter.paymentModeId:', accountId);
+          console.log('   This will filter collections by exact paymentModeId match');
           
           // Note: The validation in transformedCollections (below) provides an additional
           // layer of security to ensure no collections slip through that don't match
@@ -808,6 +824,7 @@ exports.getWalletReport = async (req, res) => {
           // them entirely when filtering by a specific accountId to maintain data integrity.
           // This is handled by setting includeExpenses and includeTransactions to false
           // when accountId is provided (see below).
+          console.log('⚠️  [WALLET REPORT] Expenses and Transactions will be EXCLUDED when filtering by accountId');
           
           // ========================================================================
           // WALLET TRANSACTIONS FILTERING - By accountId in notes
@@ -825,6 +842,9 @@ exports.getWalletReport = async (req, res) => {
           } else if (modeName.includes('bank') || description.includes('bank')) {
             accountModeType = 'Bank';
           }
+          console.log('✅ [WALLET REPORT] Account mode type detected:', accountModeType || 'Unknown');
+          console.log('   Wallet transactions will be filtered by accountId in notes field');
+          console.log('═══════════════════════════════════════════════════════════');
           
           // ========================================================================
           // CRITICAL: DO NOT APPLY MODE FILTER TO COLLECTIONS WHEN FILTERING BY ACCOUNTID
@@ -843,18 +863,23 @@ exports.getWalletReport = async (req, res) => {
           // Collections are filtered ONLY by paymentModeId (exact match) - no mode filter needed
           // ========================================================================
         } else {
+          console.log('❌ [WALLET REPORT] PaymentMode not found for accountId:', accountId);
           return res.status(404).json({
             success: false,
             message: 'Payment mode not found'
           });
         }
       } catch (error) {
-        console.error('Error fetching payment mode:', error);
+        console.error('❌ [WALLET REPORT] Error fetching payment mode:', error);
+        console.error('   Error details:', error.message);
+        console.error('   Stack trace:', error.stack);
         return res.status(500).json({
           success: false,
           message: 'Error fetching payment mode information'
         });
       }
+    } else {
+      console.log('ℹ️  [WALLET REPORT] No accountId filter - showing all accounts data');
     }
 
     if (targetUserIds && targetUserIds.length > 1) {
@@ -1031,6 +1056,7 @@ exports.getWalletReport = async (req, res) => {
       // - Complete separation of wallet transaction data between accounts
       // ========================================================================
       if (accountId) {
+        console.log('🔍 [WALLET REPORT] Applying accountId filter to wallet transactions...');
         const accountIdString = accountId.toString();
         // Escape special regex characters in accountId to prevent regex injection
         const escapedAccountId = accountIdString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1039,6 +1065,8 @@ exports.getWalletReport = async (req, res) => {
         walletTransactionFilter.notes = { 
           $regex: new RegExp(`account\\s+${escapedAccountId}(?:\\s|$)`, 'i')
         };
+        console.log('   Regex pattern:', `account\\s+${escapedAccountId}(?:\\s|$)`);
+        console.log('   This will match notes containing "account {accountId}"');
       }
     }
 
@@ -1092,12 +1120,19 @@ exports.getWalletReport = async (req, res) => {
         : []
     ]);
 
-    console.log('📦 DATA RETRIEVED:');
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('📦 [WALLET REPORT] DATABASE QUERY RESULTS:');
     console.log('   Expenses:', expenses.length, 'records');
     console.log('   Transactions:', transactions.length, 'records');
     console.log('   Collections:', collections.length, 'records');
+    if (accountId) {
+      console.log('     → Filtered by paymentModeId:', accountId);
+    }
     console.log('   Wallet Transactions:', walletTransactions?.length || 0, 'records');
-    console.log('');
+    if (accountId) {
+      console.log('     → Filtered by accountId in notes:', accountId);
+    }
+    console.log('═══════════════════════════════════════════════════════════');
 
     const transformedExpenses = expenses.map(exp => ({
       id: exp._id,
@@ -1181,6 +1216,14 @@ exports.getWalletReport = async (req, res) => {
     }));
 
     // Transform collections and ensure they match the selected account
+    if (accountId) {
+      console.log('🔍 [WALLET REPORT] Filtering collections by accountId...');
+      console.log('   Total collections before filtering:', collections.length);
+    }
+    
+    let includedCollectionsCount = 0;
+    let excludedCollectionsCount = 0;
+    
     const transformedCollections = collections
       .map(col => {
         // ========================================================================
@@ -1195,6 +1238,7 @@ exports.getWalletReport = async (req, res) => {
         if (accountId) {
           // Check if collection has paymentModeId
           if (!col.paymentModeId) {
+            excludedCollectionsCount++;
             return null; // Exclude collections without paymentModeId
           }
           
@@ -1204,6 +1248,7 @@ exports.getWalletReport = async (req, res) => {
             : (col.paymentModeId.toString ? col.paymentModeId.toString() : null);
           
           if (!collectionPaymentModeId) {
+            excludedCollectionsCount++;
             return null; // Exclude if we can't get paymentModeId
           }
           
@@ -1211,8 +1256,11 @@ exports.getWalletReport = async (req, res) => {
           
           // Only include collections that have the exact paymentModeId match
           if (collectionPaymentModeId !== selectedAccountId) {
+            excludedCollectionsCount++;
             return null; // Exclude this collection - it doesn't belong to the selected account
           }
+          
+          includedCollectionsCount++;
         }
         
         return {
@@ -1283,6 +1331,14 @@ exports.getWalletReport = async (req, res) => {
         };
       })
       .filter(col => col !== null); // Remove null entries (collections that don't match)
+    
+    if (accountId) {
+      console.log(`✅ [WALLET REPORT] Collections filtering complete:`);
+      console.log(`   Total collections queried: ${collections.length}`);
+      console.log(`   Included collections: ${includedCollectionsCount}`);
+      console.log(`   Excluded collections: ${excludedCollectionsCount}`);
+      console.log(`   Final transformed collections: ${transformedCollections.length}`);
+    }
 
     // Transform WalletTransactions (only for All Accounts Report)
     const transformedWalletTransactions = includeWalletTransactions && walletTransactions ? walletTransactions
@@ -2309,7 +2365,9 @@ exports.getSelfWalletReport = async (req, res) => {
           { collectedBy: userIdObjectId },
           { assignedReceiver: userIdObjectId }
         ]
-      }).lean(),
+      })
+      .populate('paymentModeId', 'autoPay assignedReceiver')
+      .lean(),
       WalletTransaction.find({ userId: userIdObjectId, status: 'completed' }).lean()
     ]);
     console.log('🔍 [SELF WALLET] Data fetched - Expenses:', allExpenses.length, ', Transactions:', allTransactions.length, ', Collections:', allCollections.length, ', WalletTransactions:', allWalletTransactions.length);
@@ -2335,15 +2393,69 @@ exports.getSelfWalletReport = async (req, res) => {
         }
       });
       
-      // 3. Collections - Where user is collector (Approved/Verified only)
+      // 3. Collections - Where user is collector OR assignedReceiver (Approved/Verified only)
+      // EXCLUDE AutoPay collections where collector is NOT the final receiver
+      // CRITICAL: For AutoPay, ONLY count Entry 2 (system collection), NEVER Entry 1
       allCollections.forEach(c => {
+        if (c.status !== 'Approved' && c.status !== 'Verified') {
+          return; // Skip non-approved collections
+        }
+        
+        // Check if this is an AutoPay collection
+        const paymentMode = c.paymentModeId;
+        const isAutoPayEnabled = paymentMode && paymentMode.autoPay === true;
+        const isSystemCollection = c.isSystemCollection === true;
+        const hasParentCollection = !!c.parentCollectionId; // Entry 2 has parentCollectionId
+        const collectionId = c._id?.toString() || c._id;
+        
+        // Debug logging
+        const voucherNum = c.voucherNumber || collectionId || 'Unknown';
+        console.log(`   [Collection CashIn Check] Voucher: ${voucherNum}, Amount: ₹${c.amount}`);
+        console.log(`     - isSystemCollection: ${isSystemCollection}, hasParentCollection: ${hasParentCollection}`);
+        console.log(`     - paymentMode exists: ${!!paymentMode}, autoPay: ${paymentMode?.autoPay}, mode: ${c.mode}`);
+        console.log(`     - isAutoPayEnabled: ${isAutoPayEnabled}`);
+        
+        // CRITICAL: Entry 1 should NEVER be counted for cashIn because wallet is NOT updated for Entry 1
+        // Wallet update happens only in Entry 2 (system collection)
+        // This applies to BOTH AutoPay enabled and disabled collections
+        if (!isSystemCollection && !hasParentCollection) {
+          // This is Entry 1 - skip completely (don't count for anyone)
+          // Entry 1 is just a record, wallet update happens in Entry 2
+          console.log(`   ⏭️  SKIPPING Entry 1 (wallet not updated, Entry 2 handles wallet) from cashIn calculation: ${voucherNum} - Amount: ₹${c.amount}`);
+          return; // Skip Entry 1 entirely
+        }
+        
         const isCollector = c.collectedBy && (
           (typeof c.collectedBy === 'object' && c.collectedBy._id && c.collectedBy._id.toString() === userId.toString()) ||
-          (typeof c.collectedBy === 'string' && c.collectedBy === userId.toString()) ||
+          (typeof c.collectedBy === 'string' && c.collectedBy.toString() === userId.toString()) ||
           (c.collectedBy.toString() === userId.toString())
         );
-        if (isCollector && (c.status === 'Approved' || c.status === 'Verified')) {
+        
+        const isAssignedReceiver = c.assignedReceiver && (
+          (typeof c.assignedReceiver === 'object' && c.assignedReceiver._id && c.assignedReceiver._id.toString() === userId.toString()) ||
+          (typeof c.assignedReceiver === 'string' && c.assignedReceiver.toString() === userId.toString()) ||
+          (c.assignedReceiver.toString() === userId.toString())
+        );
+        
+        console.log(`     - isCollector: ${isCollector}, isAssignedReceiver: ${isAssignedReceiver}`);
+        
+        // Handle collector case (for normal collections or Entry 2 where collector is also receiver)
+        if (isCollector) {
+          // Normal collection or Entry 2 where collector is also receiver - add to cashIn
           totalCashIn += toSafeNumber(c.amount);
+          console.log(`   ✅ ADDED collection cashIn (collector): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
+          return; // Already counted, don't count again as assignedReceiver
+        }
+        
+        // Handle assignedReceiver case (for Entry 2 - AutoPay system collections or normal collections)
+        if (isAssignedReceiver) {
+          // User is assigned receiver - add to cashIn
+          // This handles Entry 2 for AutoPay where original receiver gets the money
+          // Or normal collections where user is assignedReceiver
+          totalCashIn += toSafeNumber(c.amount);
+          console.log(`   ✅ ADDED collection cashIn (assignedReceiver): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
+        } else {
+          console.log(`   ⏭️  Skipped collection (not collector, not assignedReceiver): ${voucherNum}`);
         }
       });
       

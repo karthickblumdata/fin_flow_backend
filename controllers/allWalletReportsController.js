@@ -190,42 +190,116 @@ exports.getUserWalletReport = async (req, res) => {
 // @access  Private (SuperAdmin only)
 exports.getAllWalletReportsWithFilters = async (req, res) => {
   try {
-    const { userId, startDate, endDate } = req.query;
+    const { userId, startDate, endDate, accountId } = req.query;
     
-    console.log(`📊 [ALL WALLET REPORTS] GET /api/all-wallet-reports - Request received with filters:`, {
-      userId: userId || null,
-      startDate: startDate || null,
-      endDate: endDate || null
-    });
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('📊 [ALL WALLET REPORTS] GET /api/all-wallet-reports - Request received');
+    console.log('   Timestamp:', new Date().toISOString());
+    console.log('   Query Parameters:');
+    console.log('     - userId:', userId || 'null');
+    console.log('     - startDate:', startDate || 'null');
+    console.log('     - endDate:', endDate || 'null');
+    console.log('     - accountId:', accountId || 'null');
+    console.log('   Full Query:', JSON.stringify(req.query, null, 2));
+    console.log('═══════════════════════════════════════════════════════════');
+    
+    // Check if accountId is provided but not handled
+    if (accountId) {
+      console.log('⚠️  [ALL WALLET REPORTS] WARNING: accountId parameter received but NOT processed!');
+      console.log('   accountId:', accountId);
+      console.log('   This endpoint does not support accountId filtering.');
+      console.log('   Consider using /api/wallet/report endpoint instead.');
+    }
     
     let report;
     let userCount = 0;
     
     if (userId) {
-      // Get specific user's report
-      if (!userId.match(/^[0-9a-fA-F]{24}$/)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid user ID format'
-        });
-      }
+      // Check if userId contains commas (multiple users)
+      const userIds = userId.includes(',') 
+        ? userId.split(',').map(id => id.trim()).filter(id => id)
+        : [userId];
       
-      const user = await User.findById(userId).select('name');
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found'
-        });
+      if (userIds.length === 1) {
+        // Single user
+        console.log('📊 [ALL WALLET REPORTS] Processing single user report...');
+        const singleUserId = userIds[0];
+        
+        // Validate user ID format
+        if (!singleUserId.match(/^[0-9a-fA-F]{24}$/)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid user ID format'
+          });
+        }
+        
+        const user = await User.findById(singleUserId).select('name');
+        if (!user) {
+          return res.status(404).json({
+            success: false,
+            message: 'User not found'
+          });
+        }
+        
+        const userTotals = await calculateUserTotals(singleUserId);
+        report = {
+          cashIn: userTotals.cashIn,
+          cashOut: userTotals.cashOut,
+          balance: userTotals.balance
+        };
+        userCount = 1;
+        console.log(`✅ [ALL WALLET REPORTS] Single user report calculated: CashIn=${report.cashIn}, CashOut=${report.cashOut}, Balance=${report.balance}`);
+      } else {
+        // Multiple users - calculate aggregated totals
+        console.log(`📊 [ALL WALLET REPORTS] Processing multiple users report (${userIds.length} users)...`);
+        console.log(`   User IDs: ${userIds.join(', ')}`);
+        
+        // Validate all user IDs
+        for (const id of userIds) {
+          if (!id.match(/^[0-9a-fA-F]{24}$/)) {
+            return res.status(400).json({
+              success: false,
+              message: `Invalid user ID format: ${id}`
+            });
+          }
+        }
+        
+        // Verify all users exist
+        const users = await User.find({ _id: { $in: userIds } }).select('name _id');
+        const foundUserIds = users.map(u => u._id.toString());
+        const missingUserIds = userIds.filter(id => !foundUserIds.includes(id));
+        
+        if (missingUserIds.length > 0) {
+          return res.status(404).json({
+            success: false,
+            message: `User(s) not found: ${missingUserIds.join(', ')}`
+          });
+        }
+        
+        // Calculate totals for each user and sum them up
+        let totalCashIn = 0;
+        let totalCashOut = 0;
+        let totalBalance = 0;
+        
+        for (const id of userIds) {
+          const userTotals = await calculateUserTotals(id);
+          totalCashIn += userTotals.cashIn;
+          totalCashOut += userTotals.cashOut;
+          totalBalance += userTotals.balance;
+          
+          console.log(`   User ${id}: CashIn=${userTotals.cashIn}, CashOut=${userTotals.cashOut}, Balance=${userTotals.balance}`);
+        }
+        
+        report = {
+          cashIn: totalCashIn,
+          cashOut: totalCashOut,
+          balance: totalBalance
+        };
+        userCount = userIds.length;
+        console.log(`✅ [ALL WALLET REPORTS] Multiple users report calculated: CashIn=${report.cashIn}, CashOut=${report.cashOut}, Balance=${report.balance}, userCount=${userCount}`);
       }
-      
-      const userTotals = await calculateUserTotals(userId);
-      report = {
-        cashIn: userTotals.cashIn,
-        cashOut: userTotals.cashOut,
-        balance: userTotals.balance
-      };
-      userCount = 1;
     } else {
+      console.log('📊 [ALL WALLET REPORTS] Processing all users aggregated report...');
       // Get aggregated totals for all users
       const totals = await calculateAllUsersTotals();
       report = {
@@ -234,6 +308,7 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
         balance: totals.totalBalance
       };
       userCount = totals.userCount;
+      console.log(`✅ [ALL WALLET REPORTS] All users report calculated: CashIn=${report.cashIn}, CashOut=${report.cashOut}, Balance=${report.balance}, userCount=${userCount}`);
     }
     
     // Note: Date filtering would require querying WalletTransaction collection
@@ -246,13 +321,20 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
       filters: {
         userId: userId || null,
         startDate: startDate || null,
-        endDate: endDate || null
+        endDate: endDate || null,
+        accountId: accountId || null // Include accountId in response even if not processed
       },
       userCount: userCount,
       lastUpdated: new Date().toISOString()
     };
     
-    console.log(`📊 [ALL WALLET REPORTS] Response sent: success=true, report=${JSON.stringify(report)}, userCount=${userCount}`);
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('📊 [ALL WALLET REPORTS] Response sent:');
+    console.log('   success: true');
+    console.log('   report:', JSON.stringify(report, null, 2));
+    console.log('   userCount:', userCount);
+    console.log('   filters:', JSON.stringify(response.filters, null, 2));
+    console.log('═══════════════════════════════════════════════════════════');
     
     res.status(200).json(response);
   } catch (error) {
