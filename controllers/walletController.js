@@ -1227,6 +1227,41 @@ exports.getWalletReport = async (req, res) => {
     const transformedCollections = collections
       .map(col => {
         // ========================================================================
+        // CRITICAL: Prevent double counting for account reports
+        // ========================================================================
+        // When a collection is approved, two entries are created:
+        // - Entry 1: Original collection (isSystemCollection = false, no parentCollectionId)
+        // - Entry 2: System collection (isSystemCollection = true, has parentCollectionId)
+        // 
+        // The wallet is updated ONLY in Entry 2, so Entry 1 should NOT be counted
+        // in account reports to prevent double counting.
+        // 
+        // This applies to ALL collections (both AutoPay enabled and disabled):
+        // - AutoPay enabled + Cash mode: Entry 2 is created (normal flow)
+        // - AutoPay enabled + Non-Cash mode: Entry 2 is created (AutoPay flow)
+        // - AutoPay disabled: Entry 2 is created (normal flow)
+        // 
+        // For account reports (accountId filter), we should only count Entry 2
+        // (system collections) and exclude Entry 1 (original collections).
+        // ========================================================================
+        if (accountId) {
+          // Check if this is Entry 1 (should be excluded to prevent double counting)
+          const isSystemCollection = col.isSystemCollection === true;
+          const hasParentCollection = !!col.parentCollectionId;
+          
+          // Entry 1: NOT a system collection AND has no parentCollectionId
+          // Entry 2: IS a system collection AND has parentCollectionId
+          if (!isSystemCollection && !hasParentCollection) {
+            // This is Entry 1 - exclude it to prevent double counting
+            // Only Entry 2 (system collection) should be counted because
+            // that's where the wallet update actually happens
+            excludedCollectionsCount++;
+            console.log(`   ⏭️  [ACCOUNT REPORT] Excluding Entry 1 (Voucher: ${col.voucherNumber || col._id}) - Entry 2 will be counted instead`);
+            return null; // Exclude Entry 1
+          }
+        }
+        
+        // ========================================================================
         // STRICT VALIDATION: Ensure collection belongs to selected account
         // ========================================================================
         // When filtering by accountId, we must ensure:
@@ -1327,7 +1362,8 @@ exports.getWalletReport = async (req, res) => {
           isAutoPay: col.paymentModeId?.autoPay && col.mode !== 'Cash',
           isSystematicEntry: col.isSystematicEntry || false,
           collectionType: col.collectionType || 'collection',
-          isSystemCollection: col.isSystemCollection || false
+          isSystemCollection: col.isSystemCollection || false,
+          parentCollectionId: col.parentCollectionId || null
         };
       })
       .filter(col => col !== null); // Remove null entries (collections that don't match)
@@ -1335,9 +1371,11 @@ exports.getWalletReport = async (req, res) => {
     if (accountId) {
       console.log(`✅ [WALLET REPORT] Collections filtering complete:`);
       console.log(`   Total collections queried: ${collections.length}`);
-      console.log(`   Included collections: ${includedCollectionsCount}`);
-      console.log(`   Excluded collections: ${excludedCollectionsCount}`);
+      console.log(`   Included collections (Entry 2 only): ${includedCollectionsCount}`);
+      console.log(`   Excluded collections (Entry 1 + others): ${excludedCollectionsCount}`);
       console.log(`   Final transformed collections: ${transformedCollections.length}`);
+      console.log(`   [NOTE: Entry 1 collections are excluded to prevent double counting]`);
+      console.log(`   [NOTE: Only Entry 2 (system collections) are counted in account reports]`);
     }
 
     // Transform WalletTransactions (only for All Accounts Report)

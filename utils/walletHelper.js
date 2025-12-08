@@ -27,12 +27,22 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
   console.log(`     Operation: ${operation}`);
   console.log(`     Transaction Type: ${transactionType}`);
   
+  // Validate mode
+  const validModes = ['Cash', 'UPI', 'Bank'];
+  if (!validModes.includes(mode)) {
+    throw new Error(`Invalid payment mode: ${mode}. Must be one of: ${validModes.join(', ')}`);
+  }
+  
   const wallet = await getOrCreateWallet(userId);
   const balanceField = `${mode.toLowerCase()}Balance`;
   
+  // Get current balance value (handle null/undefined)
+  const currentBalance = wallet[balanceField] || 0;
+  
   console.log(`     Balance Field: ${balanceField}`);
+  console.log(`     Current Balance Value: ${wallet[balanceField]} (normalized: ${currentBalance})`);
   console.log(`     Wallet BEFORE:`);
-  console.log(`       - ${balanceField}: ₹${wallet[balanceField] || 0}`);
+  console.log(`       - ${balanceField}: ₹${currentBalance}`);
   console.log(`       - cashIn: ₹${wallet.cashIn || 0}`);
   console.log(`       - cashOut: ₹${wallet.cashOut || 0}`);
   
@@ -57,10 +67,12 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
         console.log(`     ✅ Reversing AutoPay collector: cashIn -₹${amount}, cashOut -₹${amount}, balance unchanged`);
       } else {
         // Normal reversal: Subtract balance and cashIn
-        if (wallet[balanceField] < amount) {
-          throw new Error(`Insufficient ${mode} balance`);
+        const currentBalance = wallet[balanceField] || 0;
+        if (currentBalance < amount) {
+          console.log(`     ❌ Balance check failed: ${currentBalance} < ${amount}`);
+          throw new Error(`Insufficient ${mode} balance. Available: ₹${currentBalance}, Required: ₹${amount}`);
         }
-        wallet[balanceField] -= amount;
+        wallet[balanceField] = (wallet[balanceField] || 0) - amount;
         wallet.cashIn = Math.max(0, (wallet.cashIn || 0) - amount);
       }
     }
@@ -94,16 +106,69 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
       }
     }
   } else if (operation === 'subtract') {
-    if (wallet[balanceField] < amount) {
-      throw new Error(`Insufficient ${mode} balance`);
+    // Get all balances
+    const cashBalance = wallet.cashBalance || 0;
+    const upiBalance = wallet.upiBalance || 0;
+    const bankBalance = wallet.bankBalance || 0;
+    const totalBalance = cashBalance + upiBalance + bankBalance;
+    const currentModeBalance = wallet[balanceField] || 0;
+    
+    console.log(`     Balance Check:`);
+    console.log(`       - Cash: ₹${cashBalance}`);
+    console.log(`       - UPI: ₹${upiBalance}`);
+    console.log(`       - Bank: ₹${bankBalance}`);
+    console.log(`       - Total: ₹${totalBalance}`);
+    console.log(`       - ${mode} Mode: ₹${currentModeBalance}`);
+    console.log(`       - Required: ₹${amount}`);
+    
+    // Check total balance (allow using any mode balance)
+    if (totalBalance < amount) {
+      console.log(`     ❌ Total balance check failed: ${totalBalance} < ${amount}`);
+      throw new Error(`Insufficient total balance. Available: ₹${totalBalance}, Required: ₹${amount}`);
     }
-    wallet[balanceField] -= amount;
+    
+    // Deduct from the specified mode first
+    let remainingAmount = amount;
+    let deductedFromMode = 0;
+    
+    // First, deduct from the expense mode
+    if (currentModeBalance > 0) {
+      deductedFromMode = Math.min(currentModeBalance, remainingAmount);
+      wallet[balanceField] = currentModeBalance - deductedFromMode;
+      remainingAmount -= deductedFromMode;
+      console.log(`     ✅ Deducted ₹${deductedFromMode} from ${mode} mode (remaining: ₹${remainingAmount})`);
+    }
+    
+    // If still need more, deduct from other modes (Cash -> UPI -> Bank priority)
+    if (remainingAmount > 0 && cashBalance > 0 && balanceField !== 'cashBalance') {
+      const deductFromCash = Math.min(cashBalance, remainingAmount);
+      wallet.cashBalance = cashBalance - deductFromCash;
+      remainingAmount -= deductFromCash;
+      console.log(`     ✅ Deducted ₹${deductFromCash} from Cash mode (remaining: ₹${remainingAmount})`);
+    }
+    
+    if (remainingAmount > 0 && upiBalance > 0 && balanceField !== 'upiBalance') {
+      const deductFromUpi = Math.min(upiBalance, remainingAmount);
+      wallet.upiBalance = upiBalance - deductFromUpi;
+      remainingAmount -= deductFromUpi;
+      console.log(`     ✅ Deducted ₹${deductFromUpi} from UPI mode (remaining: ₹${remainingAmount})`);
+    }
+    
+    if (remainingAmount > 0 && bankBalance > 0 && balanceField !== 'bankBalance') {
+      const deductFromBank = Math.min(bankBalance, remainingAmount);
+      wallet.bankBalance = bankBalance - deductFromBank;
+      remainingAmount -= deductFromBank;
+      console.log(`     ✅ Deducted ₹${deductFromBank} from Bank mode (remaining: ₹${remainingAmount})`);
+    }
+    
     // Update cashOut based on transaction type
     if (transactionType === 'expense' || 
         transactionType === 'withdraw' || 
         transactionType === 'transaction_out') {
       wallet.cashOut = (wallet.cashOut || 0) + amount;
     }
+    
+    console.log(`     ✅ Total deduction: ₹${amount} completed`);
   }
   
   await wallet.save();
@@ -120,8 +185,12 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
 
 const checkBalance = async (userId, mode, amount) => {
   const wallet = await getOrCreateWallet(userId);
-  const balanceField = `${mode.toLowerCase()}Balance`;
-  return wallet[balanceField] >= amount;
+  // Check total balance across all modes (allow using any mode)
+  const cashBalance = wallet.cashBalance || 0;
+  const upiBalance = wallet.upiBalance || 0;
+  const bankBalance = wallet.bankBalance || 0;
+  const totalBalance = cashBalance + upiBalance + bankBalance;
+  return totalBalance >= amount;
 };
 
 module.exports = {

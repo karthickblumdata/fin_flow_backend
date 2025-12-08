@@ -742,12 +742,28 @@ exports.getDashboardSummary = async (req, res) => {
     let cashOut = 0;
 
     // 1. Collections Cash In (Verified/Approved)
+    // CRITICAL: Exclude Entry 1 collections to prevent double counting
+    // Entry 1: isSystemCollection = false AND no parentCollectionId
+    // Entry 2: isSystemCollection = true AND has parentCollectionId
+    // Only Entry 2 should be counted because that's where wallet update happens
+    // Build filter properly to handle baseCollectionFilter's $or if it exists
+    const collectionsCashInMatch = {
+      $and: [
+        baseCollectionFilter,
+        {
+          status: { $in: ['Verified', 'Approved'] },
+          // Exclude Entry 1: Only count Entry 2 (system collections with parentCollectionId)
+          // Entry 2 satisfies: isSystemCollection = true OR parentCollectionId exists
+          $or: [
+            { isSystemCollection: true }, // Entry 2: system collection
+            { parentCollectionId: { $exists: true, $ne: null } } // Entry 2: has parentCollectionId
+          ]
+        }
+      ]
+    };
     const collectionsCashIn = await Collection.aggregate([
       {
-        $match: {
-          ...baseCollectionFilter,
-          status: { $in: ['Verified', 'Approved'] }
-        }
+        $match: collectionsCashInMatch
       },
       {
         $group: {
@@ -1008,10 +1024,28 @@ exports.getDashboardSummary = async (req, res) => {
     });
 
     // Collections Status Counts
-    console.log(`[Dashboard Summary] Querying collections with filter:`, JSON.stringify(baseCollectionFilter, null, 2));
+    // CRITICAL: Exclude Entry 1 collections to prevent double counting
+    // Entry 1: isSystemCollection = false AND no parentCollectionId
+    // Entry 2: isSystemCollection = true AND has parentCollectionId
+    // Only Entry 2 should be counted because that's where wallet update happens
+    // Build filter properly to handle baseCollectionFilter's $or if it exists
+    const collectionFilterForStatusCounts = {
+      $and: [
+        baseCollectionFilter,
+        {
+          // Exclude Entry 1: Only count Entry 2 (system collections with parentCollectionId)
+          // Entry 2 satisfies: isSystemCollection = true OR parentCollectionId exists
+          $or: [
+            { isSystemCollection: true }, // Entry 2: system collection
+            { parentCollectionId: { $exists: true, $ne: null } } // Entry 2: has parentCollectionId
+          ]
+        }
+      ]
+    };
+    console.log(`[Dashboard Summary] Querying collections with filter (excluding Entry 1):`, JSON.stringify(collectionFilterForStatusCounts, null, 2));
     const collectionStatusCounts = await Collection.aggregate([
       {
-        $match: baseCollectionFilter
+        $match: collectionFilterForStatusCounts
       },
       {
         $group: {
