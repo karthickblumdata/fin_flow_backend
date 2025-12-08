@@ -26,6 +26,10 @@ const transactionSchema = new mongoose.Schema({
     enum: ['Cash', 'UPI', 'Bank'],
     required: true
   },
+  paymentModeId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PaymentMode'
+  },
   purpose: {
     type: String,
     trim: true

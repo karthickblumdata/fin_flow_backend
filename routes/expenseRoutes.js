@@ -9,6 +9,7 @@ const {
   getExpenses,
   approveExpense,
   rejectExpense,
+  unapproveExpense,
   flagExpense,
   resubmitExpense,
   updateExpense,
@@ -77,6 +78,7 @@ router.post('/upload-image', protect, upload.single('image'), uploadExpenseProof
 router.put('/:id', protect, authorizeByAnyPermission(['expenses.manage', 'wallet.all.expenses.edit'], ['Admin', 'SuperAdmin']), updateExpense);
 router.post('/:id/approve', protect, approveExpense); // Allow receiver to approve if created by SuperAdmin
 router.post('/:id/reject', protect, rejectExpense); // Allow receiver to reject if created by SuperAdmin
+router.post('/:id/unapprove', protect, authorizeByAnyPermission(['expenses.manage', 'wallet.all.expenses.approve'], ['Admin', 'SuperAdmin']), unapproveExpense); // Allow Admin/SuperAdmin to unapprove
 // Flag expense - SuperAdmin OR roles with expenses.flag OR wallet.all.expenses.flag permission
 router.post('/:id/flag', protect, authorizeByAnyPermission(['expenses.flag', 'wallet.all.expenses.flag'], ['SuperAdmin']), flagExpense);
 router.post('/:id/resubmit', protect, resubmitExpense); // Allow owner or Admin/SuperAdmin to resubmit

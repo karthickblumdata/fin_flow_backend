@@ -708,16 +708,16 @@ exports.getWalletReport = async (req, res) => {
     // When filtering by a specific accountId (e.g., "Sales UPI" or "Purchase UPI"):
     // - Collections: INCLUDED (filtered by paymentModeId)
     // - Wallet Transactions: INCLUDED (filtered by accountId in notes)
-    // - Expenses: EXCLUDED (cannot distinguish between specific accounts)
-    // - Transactions: EXCLUDED (cannot distinguish between specific accounts)
+    // - Expenses: INCLUDED (filtered by paymentModeId)
+    // - Transactions: INCLUDED (filtered by paymentModeId)
     //
     // This ensures each account shows ONLY its own data, maintaining complete
     // separation between accounts.
     // ============================================================================
     const isFilteringBySpecificAccount = accountId != null;
     
-    const includeExpenses = (!type || type === 'Expenses') && !isFilteringBySpecificAccount;
-    const includeTransactions = (!type || type === 'Transactions') && !isFilteringBySpecificAccount;
+    const includeExpenses = !type || type === 'Expenses';
+    const includeTransactions = !type || type === 'Transactions';
     const includeCollections = !type || type === 'Collections';
 
     const dateRange = {};
@@ -763,9 +763,10 @@ exports.getWalletReport = async (req, res) => {
     //    a specific paymentModeId that links it to one account
     // 2. Wallet Transactions: Filter by accountId in notes field - each Add/Withdraw
     //    operation stores the accountId in the notes
-    // 3. Expenses/Transactions: EXCLUDED when filtering by accountId because they
-    //    only have generic mode ('UPI', 'Cash', 'Bank') and cannot distinguish
-    //    between specific accounts like "Sales UPI" vs "Purchase UPI"
+    // 3. Expenses: Filter by paymentModeId (exact match) - each expense has
+    //    a paymentModeId field that links it to one account
+    // 4. Transactions: Filter by paymentModeId (exact match) - each transaction has
+    //    a paymentModeId field that links it to one account
     // ============================================================================
     let selectedPaymentMode = null;
     let accountModeType = null;
@@ -816,15 +817,26 @@ exports.getWalletReport = async (req, res) => {
           // layer of security to ensure no collections slip through that don't match
           
           // ========================================================================
-          // EXPENSES/TRANSACTIONS - Excluded when filtering by accountId
+          // EXPENSES/TRANSACTIONS - Filtered by paymentModeId when filtering by accountId
           // ========================================================================
-          // Expenses and transactions only have a generic 'mode' field ('UPI', 'Cash', 'Bank')
-          // They do NOT have a paymentModeId field, so we cannot distinguish between
-          // "Sales UPI" expenses and "Purchase UPI" expenses. Therefore, we exclude
-          // them entirely when filtering by a specific accountId to maintain data integrity.
-          // This is handled by setting includeExpenses and includeTransactions to false
-          // when accountId is provided (see below).
-          console.log('⚠️  [WALLET REPORT] Expenses and Transactions will be EXCLUDED when filtering by accountId');
+          // Expenses and transactions now have a paymentModeId field, so we can filter
+          // them by the specific account. This allows us to show expenses and transactions
+          // for the selected payment mode account.
+          // ========================================================================
+          console.log('✅ [WALLET REPORT] Expenses and Transactions will be FILTERED by paymentModeId when filtering by accountId');
+          
+          // Apply paymentModeId filter to expenses and transactions
+          if (includeExpenses) {
+            expenseFilter.paymentModeId = new mongoose.Types.ObjectId(accountId);
+            console.log('✅ [WALLET REPORT] Expenses filter applied:');
+            console.log('   expenseFilter.paymentModeId:', accountId);
+          }
+          
+          if (includeTransactions) {
+            transactionFilter.paymentModeId = new mongoose.Types.ObjectId(accountId);
+            console.log('✅ [WALLET REPORT] Transactions filter applied:');
+            console.log('   transactionFilter.paymentModeId:', accountId);
+          }
           
           // ========================================================================
           // WALLET TRANSACTIONS FILTERING - By accountId in notes
@@ -1652,11 +1664,14 @@ exports.getWalletReport = async (req, res) => {
     // The 'combined' array contains ONLY the filtered data:
     // - Collections filtered by paymentModeId (exact match)
     // - Wallet transactions filtered by accountId in notes
-    // - Expenses/Transactions excluded when filtering by accountId
+    // - Expenses filtered by paymentModeId (when accountId is set)
+    // - Transactions filtered by paymentModeId (when accountId is set)
     //
     // IMPORTANT: When a new payment mode is selected with no data:
     // - Collections array will be empty (no collections with that paymentModeId)
     // - Wallet transactions array will be empty (no transactions with that accountId)
+    // - Expenses array will be empty (no expenses with that paymentModeId)
+    // - Transactions array will be empty (no transactions with that paymentModeId)
     // - Summary will correctly show: cashIn = 0, cashOut = 0, balance = 0
     //
     // Therefore, the summary calculation automatically reflects only the
@@ -2665,8 +2680,7 @@ exports.getSelfWalletReport = async (req, res) => {
     // ACCOUNT-SPECIFIC CASH IN CALCULATION
     // ============================================================================
     // When filtering by accountId (specific account like "Cash" or "Company UPI"):
-    // - Cash In = Collections (matching paymentModeId) + Wallet Transactions Add (matching accountId)
-    // - Transactions are EXCLUDED (no paymentModeId field, can't distinguish accounts)
+    // - Cash In = Collections (matching paymentModeId) + Wallet Transactions Add (matching accountId) + Transactions (matching paymentModeId)
     // ============================================================================
 
     // 1. Wallet Transactions - Add operations
@@ -2694,8 +2708,9 @@ exports.getSelfWalletReport = async (req, res) => {
     // - When user is SENDER: Transaction amount = Cash Out (handled in step below)
     // - If transaction is rejected/cancelled after approval, wallet is reversed (handled in transactionController)
     // - This logic applies consistently to ALL users in the system
-    // IMPORTANT: When filtering by accountId, Transactions are EXCLUDED from Cash In calculation
-    // because Transactions don't have paymentModeId field and can't be linked to specific accounts
+    // IMPORTANT: When filtering by accountId, Transactions are already filtered by paymentModeId
+    // in the query, so they will be included in the combined array and calculated automatically.
+    // This section handles transactions for non-account-filtered views.
     if (!isFilteringBySpecificAccount) {
       transactions.forEach(t => {
         const isReceiver = t.receiver && (
@@ -2773,9 +2788,7 @@ exports.getSelfWalletReport = async (req, res) => {
     // ACCOUNT-SPECIFIC CASH OUT CALCULATION
     // ============================================================================
     // When filtering by accountId (specific account like "Cash" or "Company UPI"):
-    // - Cash Out = Wallet Transactions Withdraw/Subtract (matching accountId)
-    // - Expenses are EXCLUDED (no paymentModeId field, can't distinguish accounts)
-    // - Transactions are EXCLUDED (no paymentModeId field, can't distinguish accounts)
+    // - Cash Out = Wallet Transactions Withdraw/Subtract (matching accountId) + Expenses (matching paymentModeId) + Transactions (matching paymentModeId)
     // ============================================================================
 
     // Track which expenses already have corresponding wallet transactions to avoid double counting
@@ -2837,8 +2850,9 @@ exports.getSelfWalletReport = async (req, res) => {
     // - If transaction is rejected/cancelled after approval, wallet is reversed (handled in transactionController)
     // - This logic applies consistently to ALL users in the system
     // Do NOT count transactions where user is receiver (those are cash in)
-    // IMPORTANT: When filtering by accountId, Transactions are EXCLUDED from Cash Out calculation
-    // because Transactions don't have paymentModeId field and can't be linked to specific accounts
+    // IMPORTANT: When filtering by accountId, Transactions are already filtered by paymentModeId
+    // in the query, so they will be included in the combined array and calculated automatically.
+    // This section handles transactions for non-account-filtered views.
     if (!isFilteringBySpecificAccount) {
       transactions.forEach(t => {
         const transactionId = t._id ? t._id.toString() : null;
@@ -2893,8 +2907,9 @@ exports.getSelfWalletReport = async (req, res) => {
     }
 
     // 3. Expenses - Calculate based on user's role (expense owner OR approver)
-    // IMPORTANT: When filtering by accountId, Expenses are EXCLUDED from Cash In/Out calculation
-    // because Expenses don't have paymentModeId field and can't be linked to specific accounts
+    // IMPORTANT: When filtering by accountId, Expenses are already filtered by paymentModeId
+    // in the query, so they will be included in the combined array and calculated automatically.
+    // This section handles expenses for non-account-filtered views.
     // 
     // Expense Logic:
     // - If user is expense owner (userId): Approved expense = Cash In (reimbursement received)

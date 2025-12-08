@@ -46,7 +46,7 @@ const createWalletTransaction = async (wallet, type, mode, amount, operation, pe
 // @access  Private
 exports.createTransaction = async (req, res) => {
   try {
-    const { sender, receiver, amount, mode, purpose, proofUrl } = req.body;
+    const { sender, receiver, amount, mode, paymentModeId, purpose, proofUrl } = req.body;
 
     // Log incoming request for debugging
     console.log('\n📝 ===== CREATE TRANSACTION REQUEST =====');
@@ -192,6 +192,7 @@ exports.createTransaction = async (req, res) => {
       receiver,
       amount: transactionAmount,
       mode: transactionMode,
+      paymentModeId: paymentModeId || null,
       purpose,
       proofUrl,
       status: 'Pending'
@@ -345,6 +346,16 @@ exports.approveTransaction = async (req, res) => {
     const { emitDashboardSummaryUpdate } = require('../utils/socketService');
     emitDashboardSummaryUpdate({ refresh: true });
 
+    // Build notes with accountId if paymentModeId is available
+    let senderNotes = transaction.purpose || `Transaction to ${transaction.receiver.name || transaction.receiver.email || transaction.receiver._id}`;
+    let receiverNotes = transaction.purpose || `Transaction from ${transaction.sender.name || transaction.sender.email || transaction.sender._id}`;
+    
+    if (transaction.paymentModeId) {
+      const accountIdStr = transaction.paymentModeId.toString();
+      senderNotes = `${senderNotes} - account ${accountIdStr}`;
+      receiverNotes = `${receiverNotes} - account ${accountIdStr}`;
+    }
+
     // Create WalletTransaction entry for sender (money deducted)
     await createWalletTransaction(
       senderWallet,
@@ -358,7 +369,7 @@ exports.approveTransaction = async (req, res) => {
         toUserId: transaction.receiver._id,
         relatedId: transaction._id,
         relatedModel: 'Transaction',
-        notes: transaction.purpose || `Transaction to ${transaction.receiver.name || transaction.receiver.email || transaction.receiver._id}`
+        notes: senderNotes
       }
     );
 
@@ -375,7 +386,7 @@ exports.approveTransaction = async (req, res) => {
         toUserId: transaction.receiver._id,
         relatedId: transaction._id,
         relatedModel: 'Transaction',
-        notes: transaction.purpose || `Transaction from ${transaction.sender.name || transaction.sender.email || transaction.sender._id}`
+        notes: receiverNotes
       }
     );
 

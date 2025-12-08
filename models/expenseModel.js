@@ -21,6 +21,10 @@ const expenseSchema = new mongoose.Schema({
     enum: ['Cash', 'UPI', 'Bank'],
     required: true
   },
+  paymentModeId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PaymentMode'
+  },
   description: {
     type: String,
     required: false, // Optional - Super Admin can create expenses without description

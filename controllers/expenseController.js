@@ -1,10 +1,46 @@
 const Expense = require('../models/expenseModel');
 const ExpenseType = require('../models/expenseTypeModel');
+const WalletTransaction = require('../models/walletTransactionModel');
 const { updateWalletBalance, getOrCreateWallet } = require('../utils/walletHelper');
 const { createAuditLog } = require('../utils/auditLogger');
 const { notifyAmountUpdate } = require('../utils/amountUpdateHelper');
 const { emitExpenseReportStatsUpdate } = require('../utils/reportUpdateHelper');
 const User = require('../models/userModel'); // Added for SuperAdmin notification
+
+// Helper function to create wallet transaction entry
+const createWalletTransaction = async (wallet, type, mode, amount, operation, performedBy, options = {}) => {
+  try {
+    const transaction = await WalletTransaction.create({
+      userId: wallet.userId,
+      walletId: wallet._id,
+      type,
+      mode,
+      amount,
+      operation,
+      fromMode: options.fromMode || null,
+      toMode: options.toMode || null,
+      fromUserId: options.fromUserId || null,
+      toUserId: options.toUserId || null,
+      relatedId: options.relatedId || null,
+      relatedModel: options.relatedModel || null,
+      balanceAfter: {
+        cashBalance: wallet.cashBalance,
+        upiBalance: wallet.upiBalance,
+        bankBalance: wallet.bankBalance,
+        totalBalance: wallet.totalBalance
+      },
+      notes: options.notes || '',
+      performedBy,
+      status: 'completed'
+    });
+
+    return transaction;
+  } catch (error) {
+    console.error('Error creating wallet transaction:', error);
+    // Don't throw error, just log it - transaction creation shouldn't break the main operation
+    return null;
+  }
+};
 
 // Helper function to check if user has Smart Approvals permission for a specific action
 const hasSmartApprovalsPermission = async (userId, action, itemType = 'expenses') => {
@@ -93,7 +129,7 @@ exports.uploadExpenseProofImage = async (req, res) => {
 // @access  Private
 exports.createExpense = async (req, res) => {
   try {
-    const { userId, category, amount, mode, description, proofUrl } = req.body;
+    const { userId, category, amount, mode, paymentModeId, description, proofUrl } = req.body;
 
     // Log user info for debugging
     console.log('\n💰 ===== CREATE EXPENSE REQUEST =====');
@@ -260,6 +296,7 @@ exports.createExpense = async (req, res) => {
       category: finalCategoryName,
       amount,
       mode,
+      paymentModeId: paymentModeId || null,
       createdBy: req.user._id,
       status: 'Pending'
     };
@@ -531,6 +568,47 @@ exports.approveExpense = async (req, res) => {
     expense.approvedAt = new Date();
     await expense.save();
 
+    // Create WalletTransaction entries with accountId in notes if paymentModeId is available
+    // Build notes with accountId if paymentModeId is available
+    let approverNotes = `Expense approved: ${expense.category || 'Expense'}`;
+    let ownerNotes = `Expense reimbursement: ${expense.category || 'Expense'}`;
+    
+    if (expense.paymentModeId) {
+      const accountIdStr = expense.paymentModeId.toString();
+      approverNotes = `${approverNotes} - account ${accountIdStr}`;
+      ownerNotes = `${ownerNotes} - account ${accountIdStr}`;
+    }
+
+    // Create WalletTransaction entry for approver (money deducted)
+    await createWalletTransaction(
+      adminWallet,
+      'expense',
+      expense.mode,
+      expense.amount,
+      'subtract',
+      req.user._id,
+      {
+        relatedId: expense._id,
+        relatedModel: 'Expense',
+        notes: approverNotes
+      }
+    );
+
+    // Create WalletTransaction entry for expense owner (money added)
+    await createWalletTransaction(
+      userWallet,
+      'expense',
+      expense.mode,
+      expense.amount,
+      'add',
+      req.user._id,
+      {
+        relatedId: expense._id,
+        relatedModel: 'Expense',
+        notes: ownerNotes
+      }
+    );
+
     // Emit dashboard summary update
     const { emitDashboardSummaryUpdate } = require('../utils/socketService');
     emitDashboardSummaryUpdate({ refresh: true });
@@ -725,6 +803,147 @@ exports.rejectExpense = async (req, res) => {
     res.status(200).json({
       success: true,
       message: 'Expense rejected successfully',
+      expense
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// @desc    Unapprove expense
+// @route   POST /api/expenses/:id/unapprove
+// @access  Private (Admin, SuperAdmin)
+exports.unapproveExpense = async (req, res) => {
+  try {
+    const expense = await Expense.findById(req.params.id).populate('userId');
+
+    if (!expense) {
+      return res.status(404).json({
+        success: false,
+        message: 'Expense not found'
+      });
+    }
+
+    // Check if request is from All Wallet Report (bypass status restrictions)
+    const fromAllWalletReport = req.query.fromAllWalletReport === 'true' || req.body.fromAllWalletReport === true;
+    
+    // Only allow unapproving approved expenses
+    if (!fromAllWalletReport && expense.status !== 'Approved') {
+      return res.status(400).json({
+        success: false,
+        message: `Expense is ${expense.status}. Only Approved expenses can be unapproved.`
+      });
+    }
+
+    // Check if expense was approved
+    const wasApproved = expense.status === 'Approved';
+    if (!wasApproved) {
+      return res.status(400).json({
+        success: false,
+        message: 'Expense is not approved. Only approved expenses can be unapproved.'
+      });
+    }
+
+    const expenseUserId = typeof expense.userId === 'object' ? expense.userId._id : expense.userId;
+    const previousStatus = expense.status;
+    
+    // Reverse wallet changes: add back to approver, subtract from expense owner
+    if (expense.approvedBy) {
+      await updateWalletBalance(expense.approvedBy, expense.mode, expense.amount, 'add', 'expense_reversal');
+      console.log(`[Expense Unapprove] Reversed approver wallet: +₹${expense.amount} to approver (${expense.approvedBy})`);
+    }
+    
+    await updateWalletBalance(expenseUserId, expense.mode, expense.amount, 'subtract', 'expense_reversal');
+    console.log(`[Expense Unapprove] Reversed expense owner wallet: -₹${expense.amount} from expense owner (${expenseUserId})`);
+
+    // Get updated wallets for notification
+    const approverWallet = expense.approvedBy ? await getOrCreateWallet(expense.approvedBy) : null;
+    const userWallet = await getOrCreateWallet(expenseUserId);
+
+    // Update expense status to Pending
+    expense.status = 'Pending';
+    expense.approvedBy = undefined;
+    expense.approvedAt = undefined;
+    await expense.save();
+
+    // Emit dashboard summary update
+    const { emitDashboardSummaryUpdate } = require('../utils/socketService');
+    emitDashboardSummaryUpdate({ refresh: true });
+
+    await createAuditLog(
+      req.user._id,
+      `Unapproved expense: ${expense._id} (Reversed wallet: +₹${expense.amount} to approver, -₹${expense.amount} from expense owner)`,
+      'Unapprove',
+      'Expense',
+      expense._id,
+      { status: previousStatus },
+      { status: 'Pending' },
+      req.ip
+    );
+
+    // Emit real-time update
+    const expenseUserObj = typeof expense.userId === 'object' ? expense.userId : null;
+    const adminUserObj = await User.findById(req.user._id);
+    
+    await notifyAmountUpdate('expense_unapproved', {
+      expenseId: expense._id,
+      userId: expenseUserId,
+      userName: expenseUserObj?.name || 'Unknown',
+      amount: expense.amount,
+      mode: expense.mode,
+      category: expense.category,
+      description: expense.description,
+      status: 'Pending',
+      wallet: {
+        cashBalance: userWallet.cashBalance,
+        upiBalance: userWallet.upiBalance,
+        bankBalance: userWallet.bankBalance,
+        totalBalance: userWallet.totalBalance
+      },
+      approverWallet: approverWallet ? {
+        cashBalance: approverWallet.cashBalance,
+        upiBalance: approverWallet.upiBalance,
+        bankBalance: approverWallet.bankBalance,
+        totalBalance: approverWallet.totalBalance
+      } : null,
+      unapprovedBy: req.user._id,
+      adminName: adminUserObj?.name || 'Unknown'
+    });
+
+    // Emit self wallet update to expense owner
+    const { emitSelfWalletUpdate } = require('../utils/socketService');
+    emitSelfWalletUpdate(expenseUserId.toString(), {
+      type: 'expense_unapproved',
+      wallet: {
+        cashBalance: userWallet.cashBalance,
+        upiBalance: userWallet.upiBalance,
+        bankBalance: userWallet.bankBalance,
+        totalBalance: userWallet.totalBalance
+      },
+    });
+
+    // Emit expense update event for real-time updates
+    const { emitExpenseUpdate } = require('../utils/socketService');
+    const expenseWithUser = await Expense.findById(expense._id)
+      .populate('userId', 'name email')
+      .populate('createdBy', 'name email')
+      .populate('approvedBy', 'name email')
+      .lean();
+    emitExpenseUpdate('unapproved', expenseWithUser || expense.toObject());
+
+    // Update saved reports with this unapproved expense
+    const { updateSavedReportsForExpense } = require('../utils/reportHelper');
+    await updateSavedReportsForExpense(expenseWithUser || expense.toObject());
+
+    // Emit expense report stats update for real-time report updates
+    await emitExpenseReportStatsUpdate();
+
+    res.status(200).json({
+      success: true,
+      message: 'Expense unapproved successfully. Wallet reversed for both approver and expense owner.',
       expense
     });
   } catch (error) {

@@ -49,6 +49,7 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
   // Handle reversals (reverse cashIn and cashOut)
   if (transactionType === 'transaction_reversal' || 
       transactionType === 'expense_reversal' || 
+      transactionType === 'expense_rejection' ||
       transactionType === 'collection_reversal' ||
       transactionType === 'collection_rejection') {
     if (operation === 'add') {
@@ -67,13 +68,59 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
         console.log(`     ✅ Reversing AutoPay collector: cashIn -₹${amount}, cashOut -₹${amount}, balance unchanged`);
       } else {
         // Normal reversal: Subtract balance and cashIn
-        const currentBalance = wallet[balanceField] || 0;
-        if (currentBalance < amount) {
-          console.log(`     ❌ Balance check failed: ${currentBalance} < ${amount}`);
-          throw new Error(`Insufficient ${mode} balance. Available: ₹${currentBalance}, Required: ₹${amount}`);
+        // For reversals, allow deducting from other modes if the original mode doesn't have enough
+        // This handles cases where balance might have been moved to other modes via expenses/transfers
+        
+        // Get all balances
+        const cashBalance = wallet.cashBalance || 0;
+        const upiBalance = wallet.upiBalance || 0;
+        const bankBalance = wallet.bankBalance || 0;
+        const totalBalance = cashBalance + upiBalance + bankBalance;
+        const currentModeBalance = wallet[balanceField] || 0;
+        
+        // Check total balance first
+        if (totalBalance < amount) {
+          console.log(`     ❌ Total balance check failed: ${totalBalance} < ${amount}`);
+          throw new Error(`Insufficient total balance. Available: ₹${totalBalance}, Required: ₹${amount}`);
         }
-        wallet[balanceField] = (wallet[balanceField] || 0) - amount;
+        
+        // Deduct from the specified mode first
+        let remainingAmount = amount;
+        let deductedFromMode = 0;
+        
+        if (currentModeBalance > 0) {
+          deductedFromMode = Math.min(currentModeBalance, remainingAmount);
+          wallet[balanceField] = currentModeBalance - deductedFromMode;
+          remainingAmount -= deductedFromMode;
+          console.log(`     ✅ Deducted ₹${deductedFromMode} from ${mode} mode (remaining: ₹${remainingAmount})`);
+        }
+        
+        // If still need more, deduct from other modes (Cash -> UPI -> Bank priority)
+        if (remainingAmount > 0 && cashBalance > 0 && balanceField !== 'cashBalance') {
+          const deductFromCash = Math.min(cashBalance, remainingAmount);
+          wallet.cashBalance = cashBalance - deductFromCash;
+          remainingAmount -= deductFromCash;
+          console.log(`     ✅ Deducted ₹${deductFromCash} from Cash mode (remaining: ₹${remainingAmount})`);
+        }
+        
+        if (remainingAmount > 0 && upiBalance > 0 && balanceField !== 'upiBalance') {
+          const deductFromUpi = Math.min(upiBalance, remainingAmount);
+          wallet.upiBalance = upiBalance - deductFromUpi;
+          remainingAmount -= deductFromUpi;
+          console.log(`     ✅ Deducted ₹${deductFromUpi} from UPI mode (remaining: ₹${remainingAmount})`);
+        }
+        
+        if (remainingAmount > 0 && bankBalance > 0 && balanceField !== 'bankBalance') {
+          const deductFromBank = Math.min(bankBalance, remainingAmount);
+          wallet.bankBalance = bankBalance - deductFromBank;
+          remainingAmount -= deductFromBank;
+          console.log(`     ✅ Deducted ₹${deductFromBank} from Bank mode (remaining: ₹${remainingAmount})`);
+        }
+        
+        // Subtract from cashIn
         wallet.cashIn = Math.max(0, (wallet.cashIn || 0) - amount);
+        console.log(`     ✅ cashIn decreased by ₹${amount} → ₹${wallet.cashIn}`);
+        console.log(`     ✅ Total deduction: ₹${amount} completed`);
       }
     }
   } else if (operation === 'add') {
@@ -165,7 +212,11 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
     if (transactionType === 'expense' || 
         transactionType === 'withdraw' || 
         transactionType === 'transaction_out') {
+      const oldCashOut = wallet.cashOut || 0;
       wallet.cashOut = (wallet.cashOut || 0) + amount;
+      console.log(`     ✅ cashOut increased by ₹${amount} (${oldCashOut} → ${wallet.cashOut})`);
+    } else {
+      console.log(`     ⚠️  cashOut NOT updated (transactionType: ${transactionType} not in expense/withdraw/transaction_out)`);
     }
     
     console.log(`     ✅ Total deduction: ₹${amount} completed`);
