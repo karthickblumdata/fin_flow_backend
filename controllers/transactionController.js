@@ -94,19 +94,60 @@ exports.createTransaction = async (req, res) => {
       });
     }
 
-    if (!mode || (typeof mode === 'string' && mode.trim() === '')) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment mode is required. Please select Cash, UPI, or Bank.'
-      });
+    // Helper function to extract mode from payment mode description
+    const extractModeFromPaymentMode = (paymentMode) => {
+      let extractedMode = 'Cash'; // Default
+      
+      // Extract mode from description
+      // Description format: "text|mode:Cash" or "text|mode:UPI" or "text|mode:Bank"
+      if (paymentMode.description) {
+        const parts = paymentMode.description.split('|');
+        for (const part of parts) {
+          if (part.includes('mode:')) {
+            const modeValue = part.split('mode:')[1]?.trim();
+            if (modeValue && ['Cash', 'UPI', 'Bank'].includes(modeValue)) {
+              extractedMode = modeValue;
+              break;
+            }
+          }
+        }
+      }
+      
+      // Fallback: try to infer from modeName if description doesn't have mode
+      if (extractedMode === 'Cash' && paymentMode.modeName) {
+        const modeName = paymentMode.modeName.toLowerCase();
+        if (modeName.includes('upi')) {
+          extractedMode = 'UPI';
+        } else if (modeName.includes('bank')) {
+          extractedMode = 'Bank';
+        }
+      }
+      
+      return extractedMode;
+    };
+
+    // Extract mode from paymentMode if not provided, default to Cash
+    let finalMode = mode;
+    if (!finalMode || (typeof finalMode === 'string' && finalMode.trim() === '')) {
+      if (paymentModeId) {
+        const PaymentMode = require('../models/paymentModeModel');
+        const paymentMode = await PaymentMode.findById(paymentModeId);
+        if (paymentMode) {
+          finalMode = extractModeFromPaymentMode(paymentMode);
+        } else {
+          finalMode = 'Cash'; // Default to Cash if paymentMode not found
+        }
+      } else {
+        finalMode = 'Cash'; // Default to Cash if no paymentModeId provided
+      }
     }
 
     // Validate mode is one of the allowed values
     const validModes = ['Cash', 'UPI', 'Bank'];
-    if (!validModes.includes(mode.trim())) {
+    if (!validModes.includes(finalMode.trim())) {
       return res.status(400).json({
         success: false,
-        message: `Invalid payment mode: ${mode}. Must be one of: ${validModes.join(', ')}`
+        message: `Invalid payment mode: ${finalMode}. Must be one of: ${validModes.join(', ')}`
       });
     }
 
@@ -172,7 +213,7 @@ exports.createTransaction = async (req, res) => {
 
     // Use parsed amount for all operations
     const transactionAmount = parsedAmount;
-    const transactionMode = mode.trim();
+    const transactionMode = finalMode.trim();
 
     // Check balance after validating users and wallets exist
     const hasBalance = await checkBalance(sender, transactionMode, transactionAmount);

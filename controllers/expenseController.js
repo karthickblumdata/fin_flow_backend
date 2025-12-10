@@ -1,7 +1,7 @@
 const Expense = require('../models/expenseModel');
 const ExpenseType = require('../models/expenseTypeModel');
 const WalletTransaction = require('../models/walletTransactionModel');
-const { updateWalletBalance, getOrCreateWallet } = require('../utils/walletHelper');
+const { updateWalletBalance, getOrCreateWallet, updatePaymentModeWalletBalance, getOrCreatePaymentModeWallet } = require('../utils/walletHelper');
 const { createAuditLog } = require('../utils/auditLogger');
 const { notifyAmountUpdate } = require('../utils/amountUpdateHelper');
 const { emitExpenseReportStatsUpdate } = require('../utils/reportUpdateHelper');
@@ -127,6 +127,38 @@ exports.uploadExpenseProofImage = async (req, res) => {
 // @desc    Create expense
 // @route   POST /api/expenses
 // @access  Private
+// Helper function to extract mode from payment mode description
+const extractModeFromPaymentMode = (paymentMode) => {
+  let mode = 'Cash'; // Default
+  
+  // Extract mode from description
+  // Description format: "text|mode:Cash" or "text|mode:UPI" or "text|mode:Bank"
+  if (paymentMode.description) {
+    const parts = paymentMode.description.split('|');
+    for (const part of parts) {
+      if (part.includes('mode:')) {
+        const modeValue = part.split('mode:')[1]?.trim();
+        if (modeValue && ['Cash', 'UPI', 'Bank'].includes(modeValue)) {
+          mode = modeValue;
+          break;
+        }
+      }
+    }
+  }
+  
+  // Fallback: try to infer from modeName if description doesn't have mode
+  if (mode === 'Cash' && paymentMode.modeName) {
+    const modeName = paymentMode.modeName.toLowerCase();
+    if (modeName.includes('upi')) {
+      mode = 'UPI';
+    } else if (modeName.includes('bank')) {
+      mode = 'Bank';
+    }
+  }
+  
+  return mode;
+};
+
 exports.createExpense = async (req, res) => {
   try {
     const { userId, category, amount, mode, paymentModeId, description, proofUrl } = req.body;
@@ -147,11 +179,25 @@ exports.createExpense = async (req, res) => {
     console.log('=====================================\n');
 
     // Basic required fields
-    if (!category || !amount || !mode) {
+    if (!category || !amount) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide category, amount, and mode'
+        message: 'Please provide category and amount'
       });
+    }
+
+    // Extract mode from paymentMode if not provided, default to Cash
+    let finalMode = mode;
+    if (!finalMode && paymentModeId) {
+      const PaymentMode = require('../models/paymentModeModel');
+      const paymentMode = await PaymentMode.findById(paymentModeId);
+      if (paymentMode) {
+        finalMode = extractModeFromPaymentMode(paymentMode);
+      } else {
+        finalMode = 'Cash'; // Default to Cash if paymentMode not found
+      }
+    } else if (!finalMode) {
+      finalMode = 'Cash'; // Default to Cash if no paymentModeId provided
     }
 
     // Validate category name
@@ -295,7 +341,7 @@ exports.createExpense = async (req, res) => {
       userId: targetUserId,
       category: finalCategoryName,
       amount,
-      mode,
+      mode: finalMode,
       paymentModeId: paymentModeId || null,
       createdBy: req.user._id,
       status: 'Pending'
@@ -535,32 +581,88 @@ exports.approveExpense = async (req, res) => {
     const wasAlreadyApproved = expense.status === 'Approved';
     
     // ============================================================================
-    // EXPENSE APPROVAL WALLET LOGIC: Approver pays Expense Owner (reimbursement)
+    // EXPENSE APPROVAL WALLET LOGIC: Payment Mode Account pays Expense Owner (reimbursement)
     // ============================================================================
     // When approver approves expense owner's expense:
-    // 1. Subtract from approver's wallet (approver pays for the expense)
+    // 1. Subtract from Payment Mode's wallet (account pays for the expense)
     // 2. Add to expense owner's wallet (expense owner receives reimbursement)
     // 
     // Example:
-    // - User 2 creates expense for ₹10
+    // - User 2 creates expense for ₹10 with Payment Mode "Cash Mode" (Active, Collection)
+    // - Payment Mode has balance: ₹1000
     // - User 1 approves
-    // - User 1 wallet: Cash Out -₹10 (User 1 pays)
-    // - User 2 wallet: Cash In +₹10 (User 2 receives reimbursement)
+    // - Payment Mode wallet: Cash Out -₹10 (₹1000 → ₹990)
+    // - User 2 wallet: Cash In +₹10 (reimbursement)
+    // - User 1 wallet: No change (Approver not affected)
     // ============================================================================
+    
+    // Always use Payment Mode index 0 (first ACTIVE Payment Mode created) for expense approval
+    const PaymentMode = require('../models/paymentModeModel');
+    
+    // Get the first ACTIVE Payment Mode (index 0) sorted by createdAt ascending
+    const firstPaymentMode = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
+    
+    console.log(`[Expense Approval] 🔍 Looking for Payment Mode index 0 (first active)...`);
+    if (firstPaymentMode) {
+      console.log(`   ✅ Found Payment Mode index 0: ${firstPaymentMode.modeName} (ID: ${firstPaymentMode._id})`);
+      console.log(`   - isActive: ${firstPaymentMode.isActive}`);
+      console.log(`   - Display: ${JSON.stringify(firstPaymentMode.display)}`);
+      console.log(`   - Created At: ${firstPaymentMode.createdAt}`);
+    } else {
+      console.log(`   ❌ No active Payment Mode found`);
+    }
     
     // Only update wallet if not already approved (prevent double wallet update)
     if (!wasAlreadyApproved) {
-      // 1. Subtract from approver's wallet (approver pays for the expense)
-      await updateWalletBalance(req.user._id, expense.mode, expense.amount, 'subtract', 'expense');
+      if (!firstPaymentMode) {
+        return res.status(404).json({
+          success: false,
+          message: 'No active Payment Mode found. Please create and activate a Payment Mode first.'
+        });
+      }
+      
+      // Explicitly check if Payment Mode is active (defensive check)
+      if (!firstPaymentMode.isActive) {
+        return res.status(400).json({
+          success: false,
+          message: 'Payment Mode is not active. Please activate the Payment Mode before approving expenses.'
+        });
+      }
+      
+      // Check if Payment Mode has Collection in display (required for expense payments)
+      const hasCollectionDisplay = firstPaymentMode.display && firstPaymentMode.display.includes('Collection');
+      if (!hasCollectionDisplay) {
+        return res.status(400).json({
+          success: false,
+          message: 'First Payment Mode must have Collection display enabled to pay for expenses.'
+        });
+      }
+      
+      // Extract mode from first Payment Mode's description (default to 'Cash' if not found)
+      let expenseMode = 'Cash';
+      if (firstPaymentMode.description) {
+        const modeMatch = firstPaymentMode.description.match(/mode:(\w+)/i);
+        if (modeMatch && modeMatch[1]) {
+          expenseMode = modeMatch[1];
+        }
+      }
+      
+      // 1. Subtract from Payment Mode index 0's wallet (account pays for the expense)
+      await updatePaymentModeWalletBalance(firstPaymentMode._id, expenseMode, expense.amount, 'subtract', 'expense');
+      console.log(`[Expense Approval] ✅ Deducted ₹${expense.amount} from Payment Mode index 0 wallet (${firstPaymentMode.modeName})`);
       
       // 2. Add to expense owner's wallet (expense owner receives reimbursement)
-      await updateWalletBalance(userId, expense.mode, expense.amount, 'add', 'expense_reimbursement');
+      await updateWalletBalance(userId, expenseMode, expense.amount, 'add', 'expense_reimbursement');
+      console.log(`[Expense Approval] ✅ Added ₹${expense.amount} to expense owner wallet (${userId})`);
     } else {
       console.log(`[Expense Approval] ⚠️  Expense was already approved - skipping wallet update to prevent double update`);
     }
 
     // Get updated wallets for notification
-    const adminWallet = await getOrCreateWallet(req.user._id);
+    let paymentModeWallet = null;
+    if (firstPaymentMode) {
+      paymentModeWallet = await getOrCreatePaymentModeWallet(firstPaymentMode._id);
+    }
     const userWallet = await getOrCreateWallet(userId);
 
     expense.status = 'Approved';
@@ -568,31 +670,19 @@ exports.approveExpense = async (req, res) => {
     expense.approvedAt = new Date();
     await expense.save();
 
-    // Create WalletTransaction entries with accountId in notes if paymentModeId is available
-    // Build notes with accountId if paymentModeId is available
+    // Create WalletTransaction entries with accountId in notes
+    // Build notes with accountId from Payment Mode index 0
     let approverNotes = `Expense approved: ${expense.category || 'Expense'}`;
     let ownerNotes = `Expense reimbursement: ${expense.category || 'Expense'}`;
     
-    if (expense.paymentModeId) {
-      const accountIdStr = expense.paymentModeId.toString();
+    if (firstPaymentMode) {
+      const accountIdStr = firstPaymentMode._id.toString();
       approverNotes = `${approverNotes} - account ${accountIdStr}`;
       ownerNotes = `${ownerNotes} - account ${accountIdStr}`;
     }
 
-    // Create WalletTransaction entry for approver (money deducted)
-    await createWalletTransaction(
-      adminWallet,
-      'expense',
-      expense.mode,
-      expense.amount,
-      'subtract',
-      req.user._id,
-      {
-        relatedId: expense._id,
-        relatedModel: 'Expense',
-        notes: approverNotes
-      }
-    );
+    // Note: Payment Mode wallet transactions are tracked in Payment Mode model itself
+    // No separate WalletTransaction entry needed for Payment Mode (it's not a user wallet)
 
     // Create WalletTransaction entry for expense owner (money added)
     await createWalletTransaction(
@@ -747,12 +837,28 @@ exports.rejectExpense = async (req, res) => {
     // If expense was approved, reverse wallet changes before rejecting
     const wasApproved = expense.status === 'Approved' || expense.status === 'Completed';
     if (wasApproved) {
-      // Reverse wallet: add back to approver, subtract from expense owner
-      if (expense.approvedBy) {
-        await updateWalletBalance(expense.approvedBy, expense.mode, expense.amount, 'add', 'expense_rejection');
+      // Reverse Payment Mode wallet (add back the amount that was deducted) - use Payment Mode index 0
+      const PaymentMode = require('../models/paymentModeModel');
+      const firstPaymentMode = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
+      if (firstPaymentMode) {
+        const hasCollectionDisplay = firstPaymentMode.display && firstPaymentMode.display.includes('Collection');
+        if (hasCollectionDisplay) {
+          // Extract mode from first Payment Mode's description (default to 'Cash' if not found)
+          let expenseMode = 'Cash';
+          if (firstPaymentMode.description) {
+            const modeMatch = firstPaymentMode.description.match(/mode:(\w+)/i);
+            if (modeMatch && modeMatch[1]) {
+              expenseMode = modeMatch[1];
+            }
+          }
+          await updatePaymentModeWalletBalance(firstPaymentMode._id, expenseMode, expense.amount, 'add', 'expense_rejection');
+          console.log(`[Expense Reject] Reversed Payment Mode wallet: +₹${expense.amount} to Payment Mode index 0 (${firstPaymentMode.modeName})`);
+        }
       }
+      
+      // Reverse expense owner wallet (subtract the reimbursement that was added)
       await updateWalletBalance(expenseUserId, expense.mode, expense.amount, 'subtract', 'expense_rejection');
-      console.log(`[Expense Reject] Reversed wallet: +₹${expense.amount} to approver, -₹${expense.amount} from expense owner`);
+      console.log(`[Expense Reject] Reversed expense owner wallet: -₹${expense.amount} from expense owner (${expenseUserId})`);
     }
 
     expense.status = 'Rejected';
@@ -850,17 +956,31 @@ exports.unapproveExpense = async (req, res) => {
     const expenseUserId = typeof expense.userId === 'object' ? expense.userId._id : expense.userId;
     const previousStatus = expense.status;
     
-    // Reverse wallet changes: add back to approver, subtract from expense owner
-    if (expense.approvedBy) {
-      await updateWalletBalance(expense.approvedBy, expense.mode, expense.amount, 'add', 'expense_reversal');
-      console.log(`[Expense Unapprove] Reversed approver wallet: +₹${expense.amount} to approver (${expense.approvedBy})`);
+    // Reverse Payment Mode wallet (add back the amount that was deducted) - use Payment Mode index 0
+    let paymentModeWallet = null;
+    const PaymentMode = require('../models/paymentModeModel');
+    const firstPaymentMode = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
+    if (firstPaymentMode && firstPaymentMode.isActive) {
+      const hasCollectionDisplay = firstPaymentMode.display && firstPaymentMode.display.includes('Collection');
+      if (hasCollectionDisplay) {
+        // Extract mode from first Payment Mode's description (default to 'Cash' if not found)
+        let expenseMode = 'Cash';
+        if (firstPaymentMode.description) {
+          const modeMatch = firstPaymentMode.description.match(/mode:(\w+)/i);
+          if (modeMatch && modeMatch[1]) {
+            expenseMode = modeMatch[1];
+          }
+        }
+        paymentModeWallet = await updatePaymentModeWalletBalance(firstPaymentMode._id, expenseMode, expense.amount, 'add', 'expense_reversal');
+        console.log(`[Expense Unapprove] Reversed Payment Mode wallet: +₹${expense.amount} to Payment Mode index 0 (${firstPaymentMode.modeName})`);
+      }
     }
     
+    // Reverse expense owner wallet (subtract the reimbursement that was added)
     await updateWalletBalance(expenseUserId, expense.mode, expense.amount, 'subtract', 'expense_reversal');
     console.log(`[Expense Unapprove] Reversed expense owner wallet: -₹${expense.amount} from expense owner (${expenseUserId})`);
 
     // Get updated wallets for notification
-    const approverWallet = expense.approvedBy ? await getOrCreateWallet(expense.approvedBy) : null;
     const userWallet = await getOrCreateWallet(expenseUserId);
 
     // Update expense status to Pending
@@ -875,7 +995,7 @@ exports.unapproveExpense = async (req, res) => {
 
     await createAuditLog(
       req.user._id,
-      `Unapproved expense: ${expense._id} (Reversed wallet: +₹${expense.amount} to approver, -₹${expense.amount} from expense owner)`,
+      `Unapproved expense: ${expense._id} (Reversed wallet: +₹${expense.amount} to Payment Mode, -₹${expense.amount} from expense owner)`,
       'Unapprove',
       'Expense',
       expense._id,
@@ -903,11 +1023,13 @@ exports.unapproveExpense = async (req, res) => {
         bankBalance: userWallet.bankBalance,
         totalBalance: userWallet.totalBalance
       },
-      approverWallet: approverWallet ? {
-        cashBalance: approverWallet.cashBalance,
-        upiBalance: approverWallet.upiBalance,
-        bankBalance: approverWallet.bankBalance,
-        totalBalance: approverWallet.totalBalance
+      paymentModeWallet: paymentModeWallet ? {
+        cashBalance: paymentModeWallet.cashBalance,
+        upiBalance: paymentModeWallet.upiBalance,
+        bankBalance: paymentModeWallet.bankBalance,
+        totalBalance: paymentModeWallet.totalBalance,
+        cashIn: paymentModeWallet.cashIn,
+        cashOut: paymentModeWallet.cashOut
       } : null,
       unapprovedBy: req.user._id,
       adminName: adminUserObj?.name || 'Unknown'
@@ -1230,12 +1352,29 @@ exports.updateExpense = async (req, res) => {
         // If unapproving an approved expense, reverse wallet changes
         if (isUnapproving) {
           const expenseUserId = typeof expense.userId === 'object' ? expense.userId._id : expense.userId;
-          // Reverse wallet: add back to approver, subtract from expense owner
-          if (expense.approvedBy) {
-            await updateWalletBalance(expense.approvedBy, expense.mode, expense.amount, 'add', 'expense_reversal');
+          
+          // Reverse Payment Mode wallet (add back the amount that was deducted) - use Payment Mode index 0
+          const PaymentMode = require('../models/paymentModeModel');
+          const firstPaymentMode = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
+          if (firstPaymentMode && firstPaymentMode.isActive) {
+            const hasCollectionDisplay = firstPaymentMode.display && firstPaymentMode.display.includes('Collection');
+            if (hasCollectionDisplay) {
+              // Extract mode from first Payment Mode's description (default to 'Cash' if not found)
+              let expenseMode = 'Cash';
+              if (firstPaymentMode.description) {
+                const modeMatch = firstPaymentMode.description.match(/mode:(\w+)/i);
+                if (modeMatch && modeMatch[1]) {
+                  expenseMode = modeMatch[1];
+                }
+              }
+              await updatePaymentModeWalletBalance(firstPaymentMode._id, expenseMode, expense.amount, 'add', 'expense_reversal');
+              console.log(`[Expense Unapprove] Reversed Payment Mode wallet: +₹${expense.amount} to Payment Mode index 0 (${firstPaymentMode.modeName})`);
+            }
           }
+          
+          // Reverse expense owner wallet (subtract the reimbursement that was added)
           await updateWalletBalance(expenseUserId, expense.mode, expense.amount, 'subtract', 'expense_reversal');
-          console.log(`[Expense Unapprove] Reversed wallet: +₹${expense.amount} to approver, -₹${expense.amount} from expense owner`);
+          console.log(`[Expense Unapprove] Reversed expense owner wallet: -₹${expense.amount} from expense owner (${expenseUserId})`);
         }
         
         expense.status = status;
@@ -1335,12 +1474,29 @@ exports.deleteExpense = async (req, res) => {
     const wasApproved = expense.status === 'Approved';
     if (wasApproved) {
       const expenseUserId = typeof expense.userId === 'object' ? expense.userId._id : expense.userId;
-      // Reverse wallet: add back to approver, subtract from expense owner
-      if (expense.approvedBy) {
-        await updateWalletBalance(expense.approvedBy, expense.mode, expense.amount, 'add', 'expense_deletion');
+      
+      // Reverse Payment Mode wallet (add back the amount that was deducted) - use Payment Mode index 0
+      const PaymentMode = require('../models/paymentModeModel');
+      const firstPaymentMode = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
+      if (firstPaymentMode) {
+        const hasCollectionDisplay = firstPaymentMode.display && firstPaymentMode.display.includes('Collection');
+        if (hasCollectionDisplay) {
+          // Extract mode from first Payment Mode's description (default to 'Cash' if not found)
+          let expenseMode = 'Cash';
+          if (firstPaymentMode.description) {
+            const modeMatch = firstPaymentMode.description.match(/mode:(\w+)/i);
+            if (modeMatch && modeMatch[1]) {
+              expenseMode = modeMatch[1];
+            }
+          }
+          await updatePaymentModeWalletBalance(firstPaymentMode._id, expenseMode, expense.amount, 'add', 'expense_deletion');
+          console.log(`[Expense Delete] Reversed Payment Mode wallet: +₹${expense.amount} to Payment Mode index 0 (${firstPaymentMode.modeName})`);
+        }
       }
+      
+      // Reverse expense owner wallet (subtract the reimbursement that was added)
       await updateWalletBalance(expenseUserId, expense.mode, expense.amount, 'subtract', 'expense_deletion');
-      console.log(`[Expense Delete] Reversed wallet: +₹${expense.amount} to approver, -₹${expense.amount} from expense owner`);
+      console.log(`[Expense Delete] Reversed expense owner wallet: -₹${expense.amount} from expense owner (${expenseUserId})`);
     }
 
     const previousState = expense.toObject();

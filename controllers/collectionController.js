@@ -2,7 +2,7 @@ const Collection = require('../models/collectionModel');
 const Transaction = require('../models/transactionModel');
 const PaymentMode = require('../models/paymentModeModel');
 const User = require('../models/userModel');
-const { updateWalletBalance, getOrCreateWallet } = require('../utils/walletHelper');
+const { updateWalletBalance, getOrCreateWallet, updatePaymentModeWalletBalance, getOrCreatePaymentModeWallet } = require('../utils/walletHelper');
 const { createAuditLog } = require('../utils/auditLogger');
 const { notifyAmountUpdate } = require('../utils/amountUpdateHelper');
 const { emitDashboardSummaryUpdate } = require('../utils/socketService');
@@ -64,14 +64,46 @@ const hasSmartApprovalsPermission = async (userId, action, itemType = 'collectio
 // @desc    Create collection
 // @route   POST /api/collections
 // @access  Private (Staff)
+// Helper function to extract mode from payment mode description (same as walletController)
+const extractModeFromPaymentMode = (paymentMode) => {
+  let mode = 'Cash'; // Default
+  
+  // Extract mode from description
+  // Description format: "text|mode:Cash" or "text|mode:UPI" or "text|mode:Bank"
+  if (paymentMode.description) {
+    const parts = paymentMode.description.split('|');
+    for (const part of parts) {
+      if (part.includes('mode:')) {
+        const modeValue = part.split('mode:')[1]?.trim();
+        if (modeValue && ['Cash', 'UPI', 'Bank'].includes(modeValue)) {
+          mode = modeValue;
+          break;
+        }
+      }
+    }
+  }
+  
+  // Fallback: try to infer from modeName if description doesn't have mode
+  if (mode === 'Cash' && paymentMode.modeName) {
+    const modeName = paymentMode.modeName.toLowerCase();
+    if (modeName.includes('upi')) {
+      mode = 'UPI';
+    } else if (modeName.includes('bank')) {
+      mode = 'Bank';
+    }
+  }
+  
+  return mode;
+};
+
 exports.createCollection = async (req, res) => {
   try {
     const { customerName, amount, mode, paymentModeId, assignedReceiver, proofUrl, notes, customFields } = req.body;
 
-    if (!customerName || !amount || !mode || !paymentModeId) {
+    if (!customerName || !amount || !paymentModeId) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide customerName, amount, mode, and paymentModeId'
+        message: 'Please provide customerName, amount, and paymentModeId'
       });
     }
 
@@ -83,10 +115,16 @@ exports.createCollection = async (req, res) => {
       });
     }
 
+    // Extract mode from paymentMode if not provided, default to Cash
+    let finalMode = mode;
+    if (!finalMode) {
+      finalMode = extractModeFromPaymentMode(paymentMode);
+    }
+
     // If payment mode has AutoPay enabled, automatically set assignedReceiver to logged-in user
     // Otherwise, use provided assignedReceiver, paymentMode's assignedReceiver, or logged-in user as fallback
     let receiverId;
-    if (paymentMode.autoPay === true && mode !== 'Cash') {
+    if (paymentMode.autoPay === true && finalMode !== 'Cash') {
       // AutoPay enabled: automatically assign to logged-in user (collector)
       receiverId = req.user._id;
       console.log(`[Collection Creation] AutoPay enabled - assignedReceiver automatically set to logged-in user: ${req.user.email}`);
@@ -124,7 +162,7 @@ exports.createCollection = async (req, res) => {
     const voucherNumber = generateVoucherNumber();
     
     // Check if payment mode has auto pay enabled (systematic entry)
-    const isSystematicEntry = paymentMode.autoPay === true && mode !== 'Cash';
+    const isSystematicEntry = paymentMode.autoPay === true && finalMode !== 'Cash';
     // Set collectionType: 'systematic' if AutoPay enabled, otherwise 'collection'
     const collectionType = isSystematicEntry ? 'systematic' : 'collection';
 
@@ -134,7 +172,7 @@ exports.createCollection = async (req, res) => {
       from: req.user._id, // From: Collection person name (collector) - who collected the money
       customerName,
       amount,
-      mode,
+      mode: finalMode,
       paymentModeId,
       assignedReceiver: receiverId, // To: Auto pay assigned person name (assigned receiver) - who receives the money
       proofUrl,
@@ -402,6 +440,26 @@ exports.approveCollection = async (req, res) => {
         : (assignedReceiverUserId || collectedByUserId); // Normal: use assignedReceiver or collector
       
       const entry2VoucherNumber = generateVoucherNumber();
+      
+      // Update Payment Mode wallet first (if collection has paymentModeId and it's active with Collection display)
+      let paymentModeWallet = null;
+      if (collection.paymentModeId) {
+        const paymentMode = await PaymentMode.findById(collection.paymentModeId);
+        if (paymentMode && paymentMode.isActive) {
+          const hasCollectionDisplay = paymentMode.display && paymentMode.display.includes('Collection');
+          if (hasCollectionDisplay) {
+            console.log(`\n   Step 0: Updating Payment Mode wallet (${paymentMode.modeName})...`);
+            paymentModeWallet = await updatePaymentModeWalletBalance(
+              collection.paymentModeId,
+              collection.mode,
+              collection.amount,
+              'add',
+              'collection'
+            );
+            console.log(`   ✅ Payment Mode Wallet Updated - CashIn: ₹${paymentModeWallet.cashIn}, CashOut: ₹${paymentModeWallet.cashOut}, Balance: ₹${paymentModeWallet.totalBalance} (+₹${collection.amount})`);
+          }
+        }
+      }
       
       // Update wallets based on AutoPay status
       let entry2Wallet;

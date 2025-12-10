@@ -58,6 +58,38 @@ const toSafeNumber = (value) => {
   return 0;
 };
 
+// Helper function to extract mode from payment mode description
+const extractModeFromPaymentMode = (paymentMode) => {
+  let mode = 'Cash'; // Default
+  
+  // Extract mode from description
+  // Description format: "text|mode:Cash" or "text|mode:UPI" or "text|mode:Bank"
+  if (paymentMode.description) {
+    const parts = paymentMode.description.split('|');
+    for (const part of parts) {
+      if (part.includes('mode:')) {
+        const modeValue = part.split('mode:')[1]?.trim();
+        if (modeValue && ['Cash', 'UPI', 'Bank'].includes(modeValue)) {
+          mode = modeValue;
+          break;
+        }
+      }
+    }
+  }
+  
+  // Fallback: try to infer from modeName if description doesn't have mode
+  if (mode === 'Cash' && paymentMode.modeName) {
+    const modeName = paymentMode.modeName.toLowerCase();
+    if (modeName.includes('upi')) {
+      mode = 'UPI';
+    } else if (modeName.includes('bank')) {
+      mode = 'Bank';
+    }
+  }
+  
+  return mode;
+};
+
 // Helper function to create wallet transaction entry
 const createWalletTransaction = async (wallet, type, mode, amount, operation, performedBy, options = {}) => {
   try {
@@ -152,19 +184,12 @@ exports.getWallet = async (req, res) => {
 // @access  Private (All users - SuperAdmin can add to any wallet, others to their own)
 exports.addAmount = async (req, res) => {
   try {
-    const { mode, amount, notes } = req.body;
+    const { paymentModeId, amount, notes } = req.body;
 
-    if (!mode || !amount) {
+    if (!paymentModeId || !amount) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide mode and amount'
-      });
-    }
-
-    if (!['Cash', 'UPI', 'Bank'].includes(mode)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid mode. Must be Cash, UPI, or Bank'
+        message: 'Please provide paymentModeId and amount'
       });
     }
 
@@ -174,6 +199,28 @@ exports.addAmount = async (req, res) => {
         message: 'Amount must be greater than 0'
       });
     }
+
+    // Fetch payment mode from database
+    const PaymentMode = require('../models/paymentModeModel');
+    const paymentMode = await PaymentMode.findById(paymentModeId);
+
+    if (!paymentMode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment mode not found'
+      });
+    }
+
+    // Check if payment mode is active
+    if (!paymentMode.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment mode is not active'
+      });
+    }
+
+    // Extract mode from payment mode description
+    const mode = extractModeFromPaymentMode(paymentMode);
 
     // Get target user wallet - role-based access control
     let targetUserId;
@@ -191,7 +238,44 @@ exports.addAmount = async (req, res) => {
         });
       }
     }
+    
+    // ============================================================================
+    // ADD AMOUNT LOGIC: Add to both User wallet AND Payment Mode wallet
+    // ============================================================================
+    // When adding amount:
+    // 1. Add to logged-in user's wallet (user receives the amount)
+    // 2. Add to selected Payment Mode wallet (Payment Mode account receives the amount)
+    // 
+    // Example:
+    // - User 1 adds ₹100 with Payment Mode "Cash Mode"
+    // - User 1 wallet: +₹100
+    // - "Cash Mode" Payment Mode wallet: +₹100
+    // ============================================================================
+    
+    // 1. Add to user wallet
     const wallet = await updateWalletBalance(targetUserId, mode, amount, 'add', 'add');
+    console.log(`[Add Amount] ✅ Added ₹${amount} to user wallet (${targetUserId})`);
+    
+    // 2. Add to Payment Mode wallet (if Payment Mode is active and has Collection display)
+    const { updatePaymentModeWalletBalance } = require('../utils/walletHelper');
+    let paymentModeWallet = null;
+    
+    if (paymentMode.isActive) {
+      const hasCollectionDisplay = paymentMode.display && paymentMode.display.includes('Collection');
+      if (hasCollectionDisplay) {
+        try {
+          paymentModeWallet = await updatePaymentModeWalletBalance(paymentModeId, mode, amount, 'add', 'add');
+          console.log(`[Add Amount] ✅ Added ₹${amount} to Payment Mode wallet (${paymentMode.modeName})`);
+        } catch (error) {
+          console.error(`[Add Amount] ⚠️  Error adding to Payment Mode wallet: ${error.message}`);
+          // Continue even if Payment Mode wallet update fails (don't break the user wallet update)
+        }
+      } else {
+        console.log(`[Add Amount] ⚠️  Payment Mode does not have Collection display - skipping Payment Mode wallet update`);
+      }
+    } else {
+      console.log(`[Add Amount] ⚠️  Payment Mode is not active - skipping Payment Mode wallet update`);
+    }
     
     // Get user info for notification
     const targetUser = await User.findById(targetUserId);
@@ -305,19 +389,12 @@ exports.addAmount = async (req, res) => {
 // @access  Private (All users - SuperAdmin can withdraw from any wallet, others from their own)
 exports.withdrawAmount = async (req, res) => {
   try {
-    const { mode, amount, notes } = req.body;
+    const { paymentModeId, amount, notes } = req.body;
 
-    if (!mode || !amount) {
+    if (!paymentModeId || !amount) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide mode and amount'
-      });
-    }
-
-    if (!['Cash', 'UPI', 'Bank'].includes(mode)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid mode. Must be Cash, UPI, or Bank'
+        message: 'Please provide paymentModeId and amount'
       });
     }
 
@@ -327,6 +404,28 @@ exports.withdrawAmount = async (req, res) => {
         message: 'Amount must be greater than 0'
       });
     }
+
+    // Fetch payment mode from database
+    const PaymentMode = require('../models/paymentModeModel');
+    const paymentMode = await PaymentMode.findById(paymentModeId);
+
+    if (!paymentMode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment mode not found'
+      });
+    }
+
+    // Check if payment mode is active
+    if (!paymentMode.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment mode is not active'
+      });
+    }
+
+    // Extract mode from payment mode description
+    const mode = extractModeFromPaymentMode(paymentMode);
 
     // Get target user wallet - role-based access control
     let targetUserId;
@@ -2005,7 +2104,16 @@ exports.getWalletReport = async (req, res) => {
       modeName: selectedPaymentMode.modeName,
       description: selectedPaymentMode.description,
       mode: accountModeType,
-      isActive: selectedPaymentMode.isActive
+      isActive: selectedPaymentMode.isActive,
+      // Wallet fields for Account Reports
+      cashBalance: selectedPaymentMode.cashBalance || 0,
+      upiBalance: selectedPaymentMode.upiBalance || 0,
+      bankBalance: selectedPaymentMode.bankBalance || 0,
+      cashIn: selectedPaymentMode.cashIn || 0,
+      cashOut: selectedPaymentMode.cashOut || 0,
+      totalBalance: (selectedPaymentMode.cashBalance || 0) + 
+                    (selectedPaymentMode.upiBalance || 0) + 
+                    (selectedPaymentMode.bankBalance || 0)
     } : null;
 
     // ============================================================================
@@ -3250,33 +3358,54 @@ exports.addAmountToAccount = async (req, res) => {
 
     // Fetch payment mode to get the correct mode (Cash, UPI, or Bank)
     const PaymentMode = require('../models/paymentModeModel');
-    let mode = 'Bank'; // Default to Bank
+    let mode = 'Cash'; // Default to Cash
+    let paymentMode = null;
     
     try {
-      const paymentMode = await PaymentMode.findById(accountId);
+      paymentMode = await PaymentMode.findById(accountId);
       if (paymentMode) {
-        // Try to extract mode from description or infer from modeName
-        const modeName = (paymentMode.modeName || '').toLowerCase();
-        if (modeName.includes('cash')) {
-          mode = 'Cash';
-        } else if (modeName.includes('upi')) {
-          mode = 'UPI';
-        } else if (modeName.includes('bank')) {
-          mode = 'Bank';
-        }
-        // If description contains mode info, use that
-        if (paymentMode.description) {
-          const desc = paymentMode.description.toLowerCase();
-          if (desc.includes('cash')) mode = 'Cash';
-          else if (desc.includes('upi')) mode = 'UPI';
-          else if (desc.includes('bank')) mode = 'Bank';
-        }
+        // Use the extractModeFromPaymentMode helper function
+        mode = extractModeFromPaymentMode(paymentMode);
       }
     } catch (error) {
-      console.log('Error fetching payment mode, using default Bank mode:', error.message);
-      // Continue with default Bank mode
+      console.log('Error fetching payment mode, using default Cash mode:', error.message);
+      // Continue with default Cash mode
     }
+    
+    // ============================================================================
+    // ADD AMOUNT TO ACCOUNT LOGIC: Add to both User wallet AND Payment Mode wallet
+    // ============================================================================
+    // When adding amount to account:
+    // 1. Add to logged-in user's wallet (user receives the amount)
+    // 2. Add to selected Payment Mode wallet (Payment Mode account receives the amount)
+    // 
+    // Note: Unlike /api/wallet/add, this endpoint updates payment mode wallet
+    // regardless of whether it has "Collection" in display array
+    // Only requirement: Payment Mode must be active
+    // ============================================================================
+    
+    // 1. Add to user wallet
     const wallet = await updateWalletBalance(targetUserId, mode, amount, 'add', 'add');
+    console.log(`[Add Amount to Account] ✅ Added ₹${amount} to user wallet (${targetUserId})`);
+    
+    // 2. Add to Payment Mode wallet (if Payment Mode is active)
+    const { updatePaymentModeWalletBalance } = require('../utils/walletHelper');
+    let paymentModeWallet = null;
+    
+    if (paymentMode && paymentMode.isActive) {
+      try {
+        paymentModeWallet = await updatePaymentModeWalletBalance(accountId, mode, amount, 'add', 'add');
+        console.log(`[Add Amount to Account] ✅ Added ₹${amount} to Payment Mode wallet (${paymentMode.modeName})`);
+        console.log(`[Add Amount to Account] Payment Mode Wallet - CashIn: ₹${paymentModeWallet.cashIn}, CashOut: ₹${paymentModeWallet.cashOut}, Balance: ₹${paymentModeWallet.totalBalance}`);
+      } catch (error) {
+        console.error(`[Add Amount to Account] ⚠️  Error adding to Payment Mode wallet: ${error.message}`);
+        // Continue even if Payment Mode wallet update fails (don't break the user wallet update)
+      }
+    } else if (paymentMode && !paymentMode.isActive) {
+      console.log(`[Add Amount to Account] ⚠️  Payment Mode is not active - skipping Payment Mode wallet update`);
+    } else if (!paymentMode) {
+      console.log(`[Add Amount to Account] ⚠️  Payment Mode not found - skipping Payment Mode wallet update`);
+    }
     
     // Get user info for notification
     const targetUser = await User.findById(targetUserId);
@@ -3356,7 +3485,15 @@ exports.addAmountToAccount = async (req, res) => {
       success: true,
       message: 'Amount added to account successfully',
       wallet,
-      transaction: walletTransaction
+      transaction: walletTransaction,
+      paymentModeWallet: paymentModeWallet ? {
+        cashBalance: paymentModeWallet.cashBalance,
+        upiBalance: paymentModeWallet.upiBalance,
+        bankBalance: paymentModeWallet.bankBalance,
+        totalBalance: paymentModeWallet.totalBalance,
+        cashIn: paymentModeWallet.cashIn,
+        cashOut: paymentModeWallet.cashOut
+      } : null
     });
   } catch (error) {
     res.status(500).json({
@@ -3403,31 +3540,17 @@ exports.withdrawFromAccount = async (req, res) => {
 
     // Fetch payment mode to get the correct mode (Cash, UPI, or Bank)
     const PaymentMode = require('../models/paymentModeModel');
-    let mode = 'Bank'; // Default to Bank
+    let mode = 'Cash'; // Default to Cash
     
     try {
       const paymentMode = await PaymentMode.findById(accountId);
       if (paymentMode) {
-        // Try to extract mode from description or infer from modeName
-        const modeName = (paymentMode.modeName || '').toLowerCase();
-        if (modeName.includes('cash')) {
-          mode = 'Cash';
-        } else if (modeName.includes('upi')) {
-          mode = 'UPI';
-        } else if (modeName.includes('bank')) {
-          mode = 'Bank';
-        }
-        // If description contains mode info, use that
-        if (paymentMode.description) {
-          const desc = paymentMode.description.toLowerCase();
-          if (desc.includes('cash')) mode = 'Cash';
-          else if (desc.includes('upi')) mode = 'UPI';
-          else if (desc.includes('bank')) mode = 'Bank';
-        }
+        // Use the extractModeFromPaymentMode helper function
+        mode = extractModeFromPaymentMode(paymentMode);
       }
     } catch (error) {
-      console.log('Error fetching payment mode, using default Bank mode:', error.message);
-      // Continue with default Bank mode
+      console.log('Error fetching payment mode, using default Cash mode:', error.message);
+      // Continue with default Cash mode
     }
     const wallet = await updateWalletBalance(targetUserId, mode, amount, 'subtract', 'withdraw');
     

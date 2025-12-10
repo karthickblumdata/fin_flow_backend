@@ -1,4 +1,144 @@
 const Wallet = require('../models/walletModel');
+const PaymentMode = require('../models/paymentModeModel');
+
+// Helper function to get or create Payment Mode wallet
+const getOrCreatePaymentModeWallet = async (paymentModeId) => {
+  if (!paymentModeId) {
+    throw new Error('Payment Mode ID is required');
+  }
+  
+  let paymentMode = await PaymentMode.findById(paymentModeId);
+  if (!paymentMode) {
+    throw new Error('Payment Mode not found');
+  }
+  
+  // Initialize wallet fields if they don't exist
+  if (paymentMode.cashBalance === undefined) {
+    paymentMode.cashBalance = 0;
+  }
+  if (paymentMode.upiBalance === undefined) {
+    paymentMode.upiBalance = 0;
+  }
+  if (paymentMode.bankBalance === undefined) {
+    paymentMode.bankBalance = 0;
+  }
+  if (paymentMode.cashIn === undefined) {
+    paymentMode.cashIn = 0;
+  }
+  if (paymentMode.cashOut === undefined) {
+    paymentMode.cashOut = 0;
+  }
+  
+  return paymentMode;
+};
+
+// Helper function to update Payment Mode wallet balance
+const updatePaymentModeWalletBalance = async (paymentModeId, mode, amount, operation = 'add', transactionType = null) => {
+  if (!paymentModeId) {
+    throw new Error('Payment Mode ID is required for wallet balance update');
+  }
+  
+  console.log(`\n   [updatePaymentModeWalletBalance] Starting Payment Mode wallet update...`);
+  console.log(`     Payment Mode ID: ${paymentModeId}`);
+  console.log(`     Mode: ${mode}`);
+  console.log(`     Amount: ₹${amount}`);
+  console.log(`     Operation: ${operation}`);
+  console.log(`     Transaction Type: ${transactionType}`);
+  
+  // Validate mode
+  const validModes = ['Cash', 'UPI', 'Bank'];
+  if (!validModes.includes(mode)) {
+    throw new Error(`Invalid payment mode: ${mode}. Must be one of: ${validModes.join(', ')}`);
+  }
+  
+  const paymentMode = await getOrCreatePaymentModeWallet(paymentModeId);
+  const balanceField = `${mode.toLowerCase()}Balance`;
+  
+  // Get current balance value (handle null/undefined)
+  const currentBalance = paymentMode[balanceField] || 0;
+  
+  console.log(`     Balance Field: ${balanceField}`);
+  console.log(`     Current Balance Value: ${paymentMode[balanceField]} (normalized: ${currentBalance})`);
+  console.log(`     Payment Mode Wallet BEFORE:`);
+  console.log(`       - ${balanceField}: ₹${currentBalance}`);
+  console.log(`       - cashIn: ₹${paymentMode.cashIn || 0}`);
+  console.log(`       - cashOut: ₹${paymentMode.cashOut || 0}`);
+  
+  // Handle reversals first
+  if (transactionType === 'expense_reversal' || 
+      transactionType === 'expense_rejection' || 
+      transactionType === 'expense_deletion' ||
+      transactionType === 'collection_reversal' ||
+      transactionType === 'collection_rejection') {
+    if (operation === 'add') {
+      // Reversing expense: Add balance back and SUBTRACT from cashOut
+      paymentMode[balanceField] = (paymentMode[balanceField] || 0) + amount;
+      paymentMode.cashOut = Math.max(0, (paymentMode.cashOut || 0) - amount);
+      console.log(`     ✅ Reversal: Added to balance, subtracted from cashOut`);
+    } else if (operation === 'subtract') {
+      // Reversing collection: Subtract balance and SUBTRACT from cashIn
+      const currentBalanceValue = paymentMode[balanceField] || 0;
+      if (currentBalanceValue >= amount) {
+        paymentMode[balanceField] = currentBalanceValue - amount;
+        paymentMode.cashIn = Math.max(0, (paymentMode.cashIn || 0) - amount);
+        console.log(`     ✅ Reversal: Subtracted from balance and cashIn`);
+      } else {
+        throw new Error(`Insufficient ${mode} balance in Payment Mode for reversal. Available: ₹${currentBalanceValue}, Required: ₹${amount}`);
+      }
+    }
+  } else if (operation === 'add') {
+    // Normal add operation
+    paymentMode[balanceField] = (paymentMode[balanceField] || 0) + amount;
+    
+    // Update cashIn for collections, add operations, and transaction_in
+    if (transactionType === 'collection' || 
+        transactionType === 'add' || 
+        transactionType === 'transaction_in') {
+      paymentMode.cashIn = (paymentMode.cashIn || 0) + amount;
+      console.log(`     ✅ Added to cashIn: +₹${amount}`);
+    }
+  } else if (operation === 'subtract') {
+    // Normal subtract operation
+    const currentBalanceValue = paymentMode[balanceField] || 0;
+    
+    if (currentBalanceValue < amount) {
+      console.log(`     ❌ Insufficient balance: ${currentBalanceValue} < ${amount}`);
+      throw new Error(`Insufficient ${mode} balance in Payment Mode. Available: ₹${currentBalanceValue}, Required: ₹${amount}`);
+    }
+    
+    paymentMode[balanceField] = currentBalanceValue - amount;
+    
+    // Update cashOut for expenses and withdrawals
+    if (transactionType === 'expense' || transactionType === 'transaction_out' || transactionType === 'withdraw') {
+      paymentMode.cashOut = (paymentMode.cashOut || 0) + amount;
+      console.log(`     ✅ Added to cashOut: +₹${amount}`);
+    }
+  }
+  
+  // Calculate total balance
+  const totalBalance = (paymentMode.cashBalance || 0) + (paymentMode.upiBalance || 0) + (paymentMode.bankBalance || 0);
+  
+  console.log(`     Payment Mode Wallet AFTER:`);
+  console.log(`       - ${balanceField}: ₹${paymentMode[balanceField]}`);
+  console.log(`       - cashIn: ₹${paymentMode.cashIn || 0}`);
+  console.log(`       - cashOut: ₹${paymentMode.cashOut || 0}`);
+  console.log(`       - totalBalance: ₹${totalBalance}`);
+  
+  await paymentMode.save();
+  
+  // Return updated payment mode with wallet info
+  const updatedPaymentMode = await PaymentMode.findById(paymentModeId);
+  return {
+    _id: updatedPaymentMode._id,
+    modeName: updatedPaymentMode.modeName,
+    cashBalance: updatedPaymentMode.cashBalance || 0,
+    upiBalance: updatedPaymentMode.upiBalance || 0,
+    bankBalance: updatedPaymentMode.bankBalance || 0,
+    totalBalance: totalBalance,
+    cashIn: updatedPaymentMode.cashIn || 0,
+    cashOut: updatedPaymentMode.cashOut || 0
+  };
+};
 
 const getOrCreateWallet = async (userId) => {
   let wallet = await Wallet.findOne({ userId });
@@ -247,5 +387,7 @@ const checkBalance = async (userId, mode, amount) => {
 module.exports = {
   getOrCreateWallet,
   updateWalletBalance,
-  checkBalance
+  checkBalance,
+  getOrCreatePaymentModeWallet,
+  updatePaymentModeWalletBalance
 };

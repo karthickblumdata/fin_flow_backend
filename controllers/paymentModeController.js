@@ -29,6 +29,20 @@ exports.createPaymentMode = async (req, res) => {
       });
     }
 
+    // Automatically set mode to Cash in description if not provided
+    let finalDescription = description ? description.trim() : '';
+    if (!finalDescription.includes('mode:')) {
+      // Add mode:Cash to description
+      if (finalDescription) {
+        finalDescription = `${finalDescription}|mode:Cash`;
+      } else {
+        finalDescription = 'mode:Cash';
+      }
+      console.log(`   ✅ Auto-added mode:Cash to description: ${finalDescription}`);
+    } else {
+      console.log(`   ℹ️  Description already contains mode, keeping as is`);
+    }
+
     // assignedReceiver is only required if autoPay is true
     const isAutoPay = autoPay === true || autoPay === 'true' || autoPay === true;
     if (isAutoPay && (!assignedReceiver || (typeof assignedReceiver === 'string' && assignedReceiver.trim() === ''))) {
@@ -42,6 +56,13 @@ exports.createPaymentMode = async (req, res) => {
     let displayArray = ['Collection']; // Default
     console.log(`\n[Create Payment Mode] User: ${userName} (ID: ${userId})`);
     console.log(`   Received display field:`, display, `Type:`, typeof display, `Is Array:`, Array.isArray(display));
+    
+    // Check for "Add Amount" in original display array (before filtering)
+    const originalDisplayArray = display && Array.isArray(display) ? display : [];
+    const hasAddAmountInDisplay = originalDisplayArray.includes('Add Amount');
+    console.log(`   Original display array:`, originalDisplayArray);
+    console.log(`   Has "Add Amount" in display:`, hasAddAmountInDisplay);
+    
     if (display && Array.isArray(display) && display.length > 0) {
       // Validate display values
       const validDisplayValues = ['Collection', 'Expenses', 'Transaction'];
@@ -55,12 +76,33 @@ exports.createPaymentMode = async (req, res) => {
       console.log(`   No display field or empty, using default:`, displayArray);
     }
 
+    // Check if this is the first Payment Mode (index 0) and has "Add Amount" in display
+    const paymentModeCount = await PaymentMode.countDocuments();
+    const isFirstPaymentMode = paymentModeCount === 0;
+    
+    // Determine isActive value
+    let finalIsActive;
+    if (isFirstPaymentMode && hasAddAmountInDisplay) {
+      // First Payment Mode (index 0) with "Add Amount" in display → automatically set isActive = true
+      finalIsActive = true;
+      console.log(`   ✅ First Payment Mode (index 0) with "Add Amount" in display → Auto-setting isActive = true`);
+    } else {
+      // Use provided isActive value or default to false
+      finalIsActive = req.body.isActive !== undefined ? req.body.isActive : false;
+      if (isFirstPaymentMode) {
+        console.log(`   ℹ️  First Payment Mode but no "Add Amount" in display → isActive = ${finalIsActive}`);
+      } else {
+        console.log(`   ℹ️  Not first Payment Mode (count: ${paymentModeCount}) → isActive = ${finalIsActive}`);
+      }
+    }
+
     const paymentMode = await PaymentMode.create({
       modeName: modeName.trim(),
-      description: description ? description.trim() : undefined,
+      description: finalDescription || undefined,
       autoPay: isAutoPay,
       assignedReceiver: assignedReceiver && assignedReceiver.trim() !== '' ? assignedReceiver : undefined,
       display: displayArray,
+      isActive: finalIsActive,
       createdBy: req.user._id
     });
 
@@ -109,8 +151,8 @@ exports.getPaymentModes = async (req, res) => {
     // Get displayType filter from query (Collection, Expenses, Transaction)
     const { displayType } = req.query;
     
-    // Build filter query
-    const filter = { isActive: true };
+    // Build filter query - Show ALL Payment Modes (both active and inactive)
+    const filter = {};
     
     // Filter by display type if provided
     if (displayType) {
@@ -125,22 +167,22 @@ exports.getPaymentModes = async (req, res) => {
       console.log(`\n🔍 [Payment Mode Filter] Filtering by display type: "${displayValue}"`);
       console.log(`   Filter query:`, JSON.stringify(filter, null, 2));
     } else {
-      console.log(`\n🔍 [Payment Mode Filter] No displayType filter - returning all active payment modes`);
+      console.log(`\n🔍 [Payment Mode Filter] No displayType filter - returning all payment modes (active and inactive)`);
     }
     
-    // Fetch only active payment modes for dropdowns and selections
-    // Filter by isActive: true and display type if provided
+    // Fetch ALL payment modes (both active and inactive) for display
+    // Filter by display type if provided, but include both active and inactive
     let paymentModes;
     try {
       paymentModes = await PaymentMode.find(filter)
         .sort({ createdAt: -1 })
         .lean();
       
-      console.log(`   Found ${paymentModes.length} active payment modes (before populate)`);
+      console.log(`   Found ${paymentModes.length} payment modes (active and inactive, before populate)`);
       if (displayType) {
         console.log(`   ✅ Filtered payment modes by display type: "${displayType}"`);
         paymentModes.forEach((mode, index) => {
-          console.log(`   [${index + 1}] ${mode.modeName}: display = ${JSON.stringify(mode.display)}`);
+          console.log(`   [${index + 1}] ${mode.modeName}: isActive = ${mode.isActive}, display = ${JSON.stringify(mode.display)}`);
         });
       }
       
@@ -172,7 +214,7 @@ exports.getPaymentModes = async (req, res) => {
         })
       );
 
-      console.log(`Successfully processed ${modesWithPopulatedReceiver.length} active payment modes`);
+      console.log(`Successfully processed ${modesWithPopulatedReceiver.length} payment modes (active and inactive)`);
 
       res.status(200).json({
         success: true,
