@@ -56,12 +56,15 @@ exports.createTransaction = async (req, res) => {
       amount: amount !== undefined ? amount : 'MISSING',
       mode: mode || 'MISSING',
       purpose: purpose || 'not provided',
-      proofUrl: proofUrl || 'not provided'
+      proofUrl: proofUrl || 'not provided',
+      paymentModeId: paymentModeId || 'not provided'
     });
     console.log('   Sender Type:', typeof sender);
     console.log('   Receiver Type:', typeof receiver);
     console.log('   Amount Type:', typeof amount);
     console.log('   Mode Type:', typeof mode);
+    console.log('   PaymentModeId Type:', typeof paymentModeId);
+    console.log('   PaymentModeId Value:', paymentModeId);
     console.log('==========================================\n');
 
     // Validate required fields with better error messages
@@ -224,6 +227,25 @@ exports.createTransaction = async (req, res) => {
       });
     }
     
+    // Validate and convert paymentModeId if provided
+    let finalPaymentModeId = null;
+    if (paymentModeId) {
+      // Check if paymentModeId is a valid ObjectId string
+      if (typeof paymentModeId === 'string' && paymentModeId.trim() !== '') {
+        const mongoose = require('mongoose');
+        if (mongoose.Types.ObjectId.isValid(paymentModeId.trim())) {
+          finalPaymentModeId = paymentModeId.trim();
+          console.log('   ✅ Valid paymentModeId provided:', finalPaymentModeId);
+        } else {
+          console.log('   ⚠️  Invalid paymentModeId format (not a valid ObjectId):', paymentModeId);
+        }
+      } else {
+        console.log('   ⚠️  paymentModeId is not a valid string:', paymentModeId);
+      }
+    } else {
+      console.log('   ℹ️  No paymentModeId provided');
+    }
+    
     // ALL transactions start as "Pending" - NO auto-approval for anyone
     // Only receiver can approve, which will update wallets
     // Create transaction as Pending - wallet will be updated only when receiver approves
@@ -233,11 +255,13 @@ exports.createTransaction = async (req, res) => {
       receiver,
       amount: transactionAmount,
       mode: transactionMode,
-      paymentModeId: paymentModeId || null,
+      paymentModeId: finalPaymentModeId,
       purpose,
       proofUrl,
       status: 'Pending'
     });
+    
+    console.log('   ✅ Transaction created with paymentModeId:', transaction.paymentModeId || 'null');
 
     await createAuditLog(
       req.user._id,

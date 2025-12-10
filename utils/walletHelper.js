@@ -281,15 +281,25 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
       console.log(`     ✅ ${balanceField} increased by ₹${amount} → ₹${wallet[balanceField]}`);
       
       // Update cashIn based on transaction type
-      if (transactionType === 'collection' || 
-          transactionType === 'add' || 
-          transactionType === 'transaction_in' ||
-          transactionType === 'expense_reimbursement') {
-        const oldCashIn = wallet.cashIn || 0;
+      // CRITICAL: Always update cashIn for collection, add, transaction_in, expense_reimbursement
+      const oldCashIn = wallet.cashIn || 0;
+      const shouldUpdateCashIn = transactionType === 'collection' || 
+                                  transactionType === 'add' || 
+                                  transactionType === 'transaction_in' ||
+                                  transactionType === 'expense_reimbursement';
+      
+      if (shouldUpdateCashIn) {
         wallet.cashIn = (wallet.cashIn || 0) + amount;
         console.log(`     ✅ cashIn increased by ₹${amount} (${oldCashIn} → ${wallet.cashIn})`);
       } else {
-        console.log(`     ⚠️  cashIn NOT updated (transactionType: ${transactionType} not in collection/add/transaction_in/expense_reimbursement)`);
+        console.log(`     ⚠️  cashIn NOT updated (transactionType: "${transactionType}" not in collection/add/transaction_in/expense_reimbursement)`);
+        console.log(`     ⚠️  Available transactionTypes: 'collection', 'add', 'transaction_in', 'expense_reimbursement'`);
+      }
+      
+      // Ensure cashIn is initialized if it's null/undefined
+      if (wallet.cashIn === null || wallet.cashIn === undefined) {
+        wallet.cashIn = shouldUpdateCashIn ? amount : 0;
+        console.log(`     ⚠️  cashIn was null/undefined, initialized to: ${wallet.cashIn}`);
       }
     }
   } else if (operation === 'subtract') {
@@ -351,12 +361,13 @@ const updateWalletBalance = async (userId, mode, amount, operation = 'add', tran
     // Update cashOut based on transaction type
     if (transactionType === 'expense' || 
         transactionType === 'withdraw' || 
-        transactionType === 'transaction_out') {
+        transactionType === 'transaction_out' ||
+        transactionType === 'collection_transfer') {
       const oldCashOut = wallet.cashOut || 0;
       wallet.cashOut = (wallet.cashOut || 0) + amount;
       console.log(`     ✅ cashOut increased by ₹${amount} (${oldCashOut} → ${wallet.cashOut})`);
     } else {
-      console.log(`     ⚠️  cashOut NOT updated (transactionType: ${transactionType} not in expense/withdraw/transaction_out)`);
+      console.log(`     ⚠️  cashOut NOT updated (transactionType: ${transactionType} not in expense/withdraw/transaction_out/collection_transfer)`);
     }
     
     console.log(`     ✅ Total deduction: ₹${amount} completed`);

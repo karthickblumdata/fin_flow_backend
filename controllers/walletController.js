@@ -1253,6 +1253,7 @@ exports.getWalletReport = async (req, res) => {
             .populate('userId', 'name email role')
             .populate('createdBy', 'name email role')
             .populate('approvedBy', 'name email role')
+            .populate('paymentModeId', 'modeName description')
             .sort({ createdAt: -1 })
         : [],
       includeTransactions
@@ -1261,6 +1262,7 @@ exports.getWalletReport = async (req, res) => {
             .populate('receiver', 'name email role')
             .populate('initiatedBy', 'name email role')
             .populate('approvedBy', 'name email role')
+            .populate('paymentModeId', 'modeName description')
             .sort({ createdAt: -1 })
         : [],
       includeCollections
@@ -1325,6 +1327,12 @@ exports.getWalletReport = async (req, res) => {
       category: exp.category,
       amount: exp.amount,
       mode: exp.mode,
+      paymentModeId: exp.paymentModeId || null,
+      paymentMode: exp.paymentModeId ? {
+        _id: exp.paymentModeId._id,
+        modeName: exp.paymentModeId.modeName,
+        description: exp.paymentModeId.description
+      } : null,
       description: exp.description || '',
       status: exp.status,
       proofUrl: exp.proofUrl || null,
@@ -1370,6 +1378,12 @@ exports.getWalletReport = async (req, res) => {
       to: tx.receiver ? tx.receiver.name : 'Unknown',
       amount: tx.amount,
       mode: tx.mode,
+      paymentModeId: tx.paymentModeId || null,
+      paymentMode: tx.paymentModeId ? {
+        _id: tx.paymentModeId._id,
+        modeName: tx.paymentModeId.modeName,
+        description: tx.paymentModeId.description
+      } : null,
       purpose: tx.purpose || '',
       status: tx.status,
       proofUrl: tx.proofUrl || null,
@@ -2502,6 +2516,7 @@ exports.getSelfWalletReport = async (req, res) => {
           .populate('userId', 'name email')
           .populate('createdBy', 'name email')
           .populate('approvedBy', 'name email')
+          .populate('paymentModeId', 'modeName description')
           .sort({ createdAt: -1 })
           .lean()
       );
@@ -2516,6 +2531,7 @@ exports.getSelfWalletReport = async (req, res) => {
           .populate('receiver', 'name email')
           .populate('initiatedBy', 'name email')
           .populate('approvedBy', 'name email')
+          .populate('paymentModeId', 'modeName description')
           .sort({ createdAt: -1 })
           .lean()
       );
@@ -2529,6 +2545,7 @@ exports.getSelfWalletReport = async (req, res) => {
           .populate('collectedBy', 'name email')
           .populate('assignedReceiver', 'name email')
           .populate('approvedBy', 'name email')
+          .populate('paymentModeId', 'modeName description autoPay assignedReceiver')
           .sort({ createdAt: -1 })
           .lean()
       );
@@ -2628,37 +2645,28 @@ exports.getSelfWalletReport = async (req, res) => {
         }
       });
       
-      // 3. Collections - Where user is collector OR assignedReceiver (Approved/Verified only)
-      // EXCLUDE AutoPay collections where collector is NOT the final receiver
-      // CRITICAL: For AutoPay, ONLY count Entry 2 (system collection), NEVER Entry 1
+      // 3. Collections - Where user is collector OR assignedReceiver
+      // UPDATED: Now includes Pending collections (Entry 1) because wallet is updated on creation
+      // For Entry 1 (Pending): Only collector gets cashIn (wallet updated on creation)
+      // For Entry 2 (Approved/Verified): Collector or assignedReceiver gets cashIn based on approval flow
       allCollections.forEach(c => {
-        if (c.status !== 'Approved' && c.status !== 'Verified') {
-          return; // Skip non-approved collections
-        }
+        const isSystemCollection = c.isSystemCollection === true;
+        const hasParentCollection = !!c.parentCollectionId; // Entry 2 has parentCollectionId
+        const isEntry1 = !isSystemCollection && !hasParentCollection;
+        const isEntry2 = isSystemCollection || hasParentCollection;
         
         // Check if this is an AutoPay collection
         const paymentMode = c.paymentModeId;
         const isAutoPayEnabled = paymentMode && paymentMode.autoPay === true;
-        const isSystemCollection = c.isSystemCollection === true;
-        const hasParentCollection = !!c.parentCollectionId; // Entry 2 has parentCollectionId
         const collectionId = c._id?.toString() || c._id;
+        const voucherNum = c.voucherNumber || collectionId || 'Unknown';
         
         // Debug logging
-        const voucherNum = c.voucherNumber || collectionId || 'Unknown';
-        console.log(`   [Collection CashIn Check] Voucher: ${voucherNum}, Amount: ₹${c.amount}`);
+        console.log(`   [Collection CashIn Check] Voucher: ${voucherNum}, Amount: ₹${c.amount}, Status: ${c.status}`);
+        console.log(`     - isEntry1: ${isEntry1}, isEntry2: ${isEntry2}`);
         console.log(`     - isSystemCollection: ${isSystemCollection}, hasParentCollection: ${hasParentCollection}`);
         console.log(`     - paymentMode exists: ${!!paymentMode}, autoPay: ${paymentMode?.autoPay}, mode: ${c.mode}`);
         console.log(`     - isAutoPayEnabled: ${isAutoPayEnabled}`);
-        
-        // CRITICAL: Entry 1 should NEVER be counted for cashIn because wallet is NOT updated for Entry 1
-        // Wallet update happens only in Entry 2 (system collection)
-        // This applies to BOTH AutoPay enabled and disabled collections
-        if (!isSystemCollection && !hasParentCollection) {
-          // This is Entry 1 - skip completely (don't count for anyone)
-          // Entry 1 is just a record, wallet update happens in Entry 2
-          console.log(`   ⏭️  SKIPPING Entry 1 (wallet not updated, Entry 2 handles wallet) from cashIn calculation: ${voucherNum} - Amount: ₹${c.amount}`);
-          return; // Skip Entry 1 entirely
-        }
         
         const isCollector = c.collectedBy && (
           (typeof c.collectedBy === 'object' && c.collectedBy._id && c.collectedBy._id.toString() === userId.toString()) ||
@@ -2674,11 +2682,31 @@ exports.getSelfWalletReport = async (req, res) => {
         
         console.log(`     - isCollector: ${isCollector}, isAssignedReceiver: ${isAssignedReceiver}`);
         
+        // Handle Entry 1 (Pending collections) - Collector gets cashIn (wallet updated on creation)
+        if (isEntry1) {
+          if (isCollector && (c.status === 'Pending' || c.status === 'Approved' || c.status === 'Verified')) {
+            // Entry 1: Collector gets cashIn when collection is created (Pending status)
+            // Wallet is updated on creation, so count it for collector
+            totalCashIn += toSafeNumber(c.amount);
+            console.log(`   ✅ ADDED Entry 1 collection cashIn (collector, status: ${c.status}): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
+          } else {
+            console.log(`   ⏭️  SKIPPING Entry 1 (not collector or wrong status): ${voucherNum} - Status: ${c.status}`);
+          }
+          return; // Entry 1 handled, don't process further
+        }
+        
+        // Handle Entry 2 (Approved/Verified collections only)
+        if (isEntry2) {
+          if (c.status !== 'Approved' && c.status !== 'Verified') {
+            console.log(`   ⏭️  SKIPPING Entry 2 (not approved/verified): ${voucherNum} - Status: ${c.status}`);
+            return; // Skip non-approved Entry 2
+          }
+        
         // Handle collector case (for normal collections or Entry 2 where collector is also receiver)
         if (isCollector) {
           // Normal collection or Entry 2 where collector is also receiver - add to cashIn
           totalCashIn += toSafeNumber(c.amount);
-          console.log(`   ✅ ADDED collection cashIn (collector): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
+            console.log(`   ✅ ADDED Entry 2 collection cashIn (collector): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
           return; // Already counted, don't count again as assignedReceiver
         }
         
@@ -2688,9 +2716,10 @@ exports.getSelfWalletReport = async (req, res) => {
           // This handles Entry 2 for AutoPay where original receiver gets the money
           // Or normal collections where user is assignedReceiver
           totalCashIn += toSafeNumber(c.amount);
-          console.log(`   ✅ ADDED collection cashIn (assignedReceiver): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
+            console.log(`   ✅ ADDED Entry 2 collection cashIn (assignedReceiver): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
         } else {
-          console.log(`   ⏭️  Skipped collection (not collector, not assignedReceiver): ${voucherNum}`);
+            console.log(`   ⏭️  Skipped Entry 2 collection (not collector, not assignedReceiver): ${voucherNum}`);
+          }
         }
       });
       
@@ -2769,6 +2798,24 @@ exports.getSelfWalletReport = async (req, res) => {
         const isApproved = expense.status === 'Approved' || expense.status === 'Completed';
         if (isApprover && isApproved) {
           totalCashOut += toSafeNumber(expense.amount);
+        }
+      });
+      
+      // 4. Collections - Where user is collector and collection is Approved (Option B: Money transferred from collector)
+      // When collection is approved, collector's wallet gets CashOut (money transferred to receiver)
+      allCollections.forEach(c => {
+        const isCollector = c.collectedBy && (
+          (typeof c.collectedBy === 'object' && c.collectedBy._id && c.collectedBy._id.toString() === userId.toString()) ||
+          (typeof c.collectedBy === 'string' && c.collectedBy.toString() === userId.toString()) ||
+          (c.collectedBy.toString() === userId.toString())
+        );
+        
+        // Count approved collections where user is collector (Option B: collector transferred money)
+        // Only count Entry 1 (original collection), not Entry 2 (system collection)
+        const isEntry1 = !c.isSystemCollection && !c.parentCollectionId;
+        if (isCollector && isEntry1 && (c.status === 'Approved' || c.status === 'Verified')) {
+          totalCashOut += toSafeNumber(c.amount);
+          console.log(`   ✅ ADDED collection cashOut (collector, approved): Voucher ${c.voucherNumber || c._id} - Amount: ₹${c.amount}, Total cashOut now: ₹${totalCashOut}`);
         }
       });
       
@@ -2886,9 +2933,10 @@ exports.getSelfWalletReport = async (req, res) => {
         (c.collectedBy.toString() === userId.toString())
       );
 
-      // Only count collections where user is the collector
+      // Count collections where user is the collector
+      // Include Pending status (wallet updated on creation) and Approved/Verified status
       // Do NOT count if user is only the assigned receiver (they get cashIn from transaction, not collection)
-      if (isCollector && (c.status === 'Approved' || c.status === 'Verified')) {
+      if (isCollector && (c.status === 'Pending' || c.status === 'Approved' || c.status === 'Verified')) {
         const amount = toSafeNumber(c.amount);
         cashIn += amount;
         
@@ -2915,6 +2963,7 @@ exports.getSelfWalletReport = async (req, res) => {
     let cashOutFromWalletTransactions = 0;
     let cashOutFromTransactions = 0;
     let cashOutFromExpenses = 0;
+    let cashOutFromCollections = 0;
 
     // ============================================================================
     // ACCOUNT-SPECIFIC CASH OUT CALCULATION
@@ -3148,7 +3197,12 @@ exports.getSelfWalletReport = async (req, res) => {
       allData.push({
         ...e,
         dataType: 'Expense',
-        type: 'Expenses' // Add type field for frontend filtering (plural form)
+        type: 'Expenses', // Add type field for frontend filtering (plural form)
+        paymentMode: e.paymentModeId ? {
+          _id: e.paymentModeId._id,
+          modeName: e.paymentModeId.modeName,
+          description: e.paymentModeId.description
+        } : null
       });
     });
     
@@ -3156,7 +3210,12 @@ exports.getSelfWalletReport = async (req, res) => {
       allData.push({
         ...t,
         dataType: 'Transaction',
-        type: 'Transactions' // Add type field for frontend filtering (plural form)
+        type: 'Transactions', // Add type field for frontend filtering (plural form)
+        paymentMode: t.paymentModeId ? {
+          _id: t.paymentModeId._id,
+          modeName: t.paymentModeId.modeName,
+          description: t.paymentModeId.description
+        } : null
       });
     });
     
@@ -3164,7 +3223,12 @@ exports.getSelfWalletReport = async (req, res) => {
       allData.push({
         ...c,
         dataType: 'Collection',
-        type: 'Collections' // Add type field for frontend filtering (plural form)
+        type: 'Collections', // Add type field for frontend filtering (plural form)
+        paymentMode: c.paymentModeId ? {
+          _id: c.paymentModeId._id,
+          modeName: c.paymentModeId.modeName,
+          description: c.paymentModeId.description
+        } : null
       });
     });
     
@@ -3209,6 +3273,7 @@ exports.getSelfWalletReport = async (req, res) => {
     console.log('         - From Wallet Transactions:', cashOutFromWalletTransactions);
     console.log('         - From Transactions (as sender, no wallet transaction):', cashOutFromTransactions);
     console.log('         - From Expenses:', cashOutFromExpenses);
+        console.log('         - From Collections (approved, collector):', cashOutFromCollections);
     console.log('         - Total Cash Out (calculated):', cashOut);
     console.log(`     - Transactions tracked with wallet transactions: ${accountTransactionsWithWalletTransactions.size}`);
     console.log(`     - Expenses tracked with wallet transactions: ${accountExpensesWithWalletTransactions.size}`);

@@ -60,6 +60,12 @@ const walletTransactionSchema = new mongoose.Schema({
     type: String,
     enum: ['Transaction', 'Collection', 'Expense', null]
   },
+  // Reference to payment mode (for Add Amount and Withdraw operations)
+  paymentModeId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PaymentMode',
+    index: true
+  },
   // Balance after this transaction
   balanceAfter: {
     cashBalance: { type: Number, default: 0 },
@@ -90,6 +96,7 @@ walletTransactionSchema.index({ userId: 1, createdAt: -1 });
 walletTransactionSchema.index({ walletId: 1, createdAt: -1 });
 walletTransactionSchema.index({ type: 1, createdAt: -1 });
 walletTransactionSchema.index({ mode: 1, createdAt: -1 });
+walletTransactionSchema.index({ paymentModeId: 1, createdAt: -1 });
 walletTransactionSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('WalletTransaction', walletTransactionSchema);
