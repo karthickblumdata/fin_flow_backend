@@ -90,6 +90,52 @@ const extractModeFromPaymentMode = (paymentMode) => {
   return mode;
 };
 
+// Helper function to safely extract paymentMode object with fallback
+// If populate failed, this will fetch the PaymentMode from database
+const getPaymentModeObject = async (paymentModeId, includeAutoPay = false) => {
+  if (!paymentModeId) {
+    return null;
+  }
+  
+  // If paymentModeId is already populated (object with modeName), return it
+  if (typeof paymentModeId === 'object' && paymentModeId.modeName) {
+    const result = {
+      _id: paymentModeId._id || paymentModeId,
+      id: paymentModeId._id || paymentModeId,
+      modeName: paymentModeId.modeName,
+      description: paymentModeId.description || null
+    };
+    if (includeAutoPay && paymentModeId.autoPay !== undefined) {
+      result.autoPay = paymentModeId.autoPay;
+    }
+    return result;
+  }
+  
+  // If paymentModeId is an ObjectId string or ObjectId, fetch from database
+  try {
+    const PaymentMode = require('../models/paymentModeModel');
+    const selectFields = includeAutoPay ? 'modeName description autoPay' : 'modeName description';
+    const paymentMode = await PaymentMode.findById(paymentModeId).select(selectFields).lean();
+    
+    if (paymentMode && paymentMode.modeName) {
+      const result = {
+        _id: paymentMode._id || paymentModeId,
+        id: paymentMode._id || paymentModeId,
+        modeName: paymentMode.modeName,
+        description: paymentMode.description || null
+      };
+      if (includeAutoPay && paymentMode.autoPay !== undefined) {
+        result.autoPay = paymentMode.autoPay;
+      }
+      return result;
+    }
+  } catch (error) {
+    console.error(`[getPaymentModeObject] Error fetching PaymentMode ${paymentModeId}:`, error.message);
+  }
+  
+  return null;
+};
+
 // Helper function to create wallet transaction entry
 const createWalletTransaction = async (wallet, type, mode, amount, operation, performedBy, options = {}) => {
   try {
@@ -1385,6 +1431,27 @@ exports.getWalletReport = async (req, res) => {
     if (accountId) {
       console.log('     → Filtered by accountId in notes:', accountId);
     }
+    // Debug: Check paymentModeId population for Transactions
+    if (transactions && transactions.length > 0) {
+      console.log('   🔍 [WALLET REPORT] Checking paymentModeId population for Transactions:');
+      transactions.slice(0, 3).forEach((tx, idx) => {
+        console.log(`     Transaction ${idx + 1} (ID: ${tx._id}):`);
+        console.log(`       mode: ${tx.mode}`);
+        console.log(`       paymentModeId (raw): ${tx.paymentModeId}`);
+        console.log(`       paymentModeId type: ${typeof tx.paymentModeId}`);
+        if (tx.paymentModeId) {
+          if (typeof tx.paymentModeId === 'object' && tx.paymentModeId.modeName) {
+            console.log(`       ✅ paymentMode populated - modeName: ${tx.paymentModeId.modeName}`);
+          } else if (typeof tx.paymentModeId === 'object') {
+            console.log(`       ⚠️  paymentMode is object but modeName missing:`, tx.paymentModeId);
+          } else {
+            console.log(`       ⚠️  paymentModeId is not populated (ObjectId string): ${tx.paymentModeId}`);
+          }
+        } else {
+          console.log(`       ⚠️  paymentModeId is null or undefined`);
+        }
+      });
+    }
     // Debug: Check paymentModeId population for WalletTransactions
     if (walletTransactions && walletTransactions.length > 0) {
       console.log('   🔍 [WALLET REPORT] Checking paymentModeId population for WalletTransactions:');
@@ -1401,97 +1468,111 @@ exports.getWalletReport = async (req, res) => {
     }
     console.log('═══════════════════════════════════════════════════════════');
 
-    const transformedExpenses = expenses.map(exp => ({
-      id: exp._id,
-      type: 'Expenses',
-      date: exp.createdAt,
-      createdAt: exp.createdAt,
-      userId: exp.userId ? {
-        id: exp.userId._id,
-        name: exp.userId.name,
-        email: exp.userId.email,
-        role: exp.userId.role
-      } : null,
-      createdBy: exp.createdBy ? {
-        id: exp.createdBy._id,
-        name: exp.createdBy.name,
-        email: exp.createdBy.email,
-        role: exp.createdBy.role
-      } : null,
-      approvedBy: exp.approvedBy ? {
-        id: exp.approvedBy._id,
-        name: exp.approvedBy.name,
-        email: exp.approvedBy.email,
-        role: exp.approvedBy.role
-      } : null,
-      from: exp.userId ? exp.userId.name : 'Unknown',
-      to: '-',
-      category: exp.category,
-      amount: exp.amount,
-      mode: exp.mode,
-      paymentModeId: exp.paymentModeId || null,
-      paymentMode: exp.paymentModeId ? {
-        _id: exp.paymentModeId._id,
-        modeName: exp.paymentModeId.modeName,
-        description: exp.paymentModeId.description
-      } : null,
-      description: exp.description || '',
-      status: exp.status,
-      proofUrl: exp.proofUrl || null,
-      flagReason: exp.flagReason || null
+    // Transform expenses with paymentMode fallback
+    const transformedExpenses = await Promise.all(expenses.map(async (exp) => {
+      // Get paymentMode with fallback (will fetch from DB if populate failed)
+      const paymentMode = await getPaymentModeObject(exp.paymentModeId);
+      
+      // Get paymentModeId value (could be ObjectId string or object)
+      const paymentModeIdValue = exp.paymentModeId 
+        ? (exp.paymentModeId._id || exp.paymentModeId.toString() || exp.paymentModeId)
+        : null;
+      
+      return {
+        id: exp._id,
+        type: 'Expenses',
+        date: exp.createdAt,
+        createdAt: exp.createdAt,
+        userId: exp.userId ? {
+          id: exp.userId._id,
+          name: exp.userId.name,
+          email: exp.userId.email,
+          role: exp.userId.role
+        } : null,
+        createdBy: exp.createdBy ? {
+          id: exp.createdBy._id,
+          name: exp.createdBy.name,
+          email: exp.createdBy.email,
+          role: exp.createdBy.role
+        } : null,
+        approvedBy: exp.approvedBy ? {
+          id: exp.approvedBy._id,
+          name: exp.approvedBy.name,
+          email: exp.approvedBy.email,
+          role: exp.approvedBy.role
+        } : null,
+        from: exp.userId ? exp.userId.name : 'Unknown',
+        to: '-',
+        category: exp.category,
+        amount: exp.amount,
+        mode: exp.mode,
+        paymentModeId: paymentModeIdValue,
+        paymentMode: paymentMode,
+        description: exp.description || '',
+        status: exp.status,
+        proofUrl: exp.proofUrl || null,
+        flagReason: exp.flagReason || null
+      };
     }));
 
-    const transformedTransactions = transactions.map(tx => ({
-      id: tx._id,
-      type: 'Transactions',
-      date: tx.createdAt,
-      createdAt: tx.createdAt,
-      sender: tx.sender ? {
-        id: tx.sender._id,
-        name: tx.sender.name,
-        email: tx.sender.email,
-        role: tx.sender.role
-      } : null,
-      receiver: tx.receiver ? {
-        id: tx.receiver._id,
-        name: tx.receiver.name,
-        email: tx.receiver.email,
-        role: tx.receiver.role
-      } : null,
-      initiatedBy: tx.initiatedBy ? {
-        id: tx.initiatedBy._id,
-        name: tx.initiatedBy.name,
-        email: tx.initiatedBy.email,
-        role: tx.initiatedBy.role
-      } : null,
-      approvedBy: tx.approvedBy ? {
-        id: tx.approvedBy._id,
-        name: tx.approvedBy.name,
-        email: tx.approvedBy.email,
-        role: tx.approvedBy.role
-      } : null,
-      createdBy: tx.initiatedBy ? {
-        id: tx.initiatedBy._id,
-        name: tx.initiatedBy.name,
-        email: tx.initiatedBy.email,
-        role: tx.initiatedBy.role
-      } : null,
-      from: tx.sender ? tx.sender.name : 'Unknown',
-      to: tx.receiver ? tx.receiver.name : 'Unknown',
-      amount: tx.amount,
-      mode: tx.mode,
-      paymentModeId: tx.paymentModeId || null,
-      paymentMode: (tx.paymentModeId && typeof tx.paymentModeId === 'object' && tx.paymentModeId.modeName) ? {
-        _id: tx.paymentModeId._id,
-        modeName: tx.paymentModeId.modeName,
-        description: tx.paymentModeId.description
-      } : null,
-      purpose: tx.purpose || '',
-      status: tx.status,
-      proofUrl: tx.proofUrl || null,
-      flagReason: tx.flagReason || null,
-      isAutoPay: tx.isAutoPay,
-      isSystemTransaction: tx.isSystemTransaction || false
+    // Transform transactions with paymentMode fallback
+    const transformedTransactions = await Promise.all(transactions.map(async (tx) => {
+      // Get paymentMode with fallback (will fetch from DB if populate failed)
+      const paymentMode = await getPaymentModeObject(tx.paymentModeId);
+      
+      // Get paymentModeId value (could be ObjectId string or object)
+      const paymentModeIdValue = tx.paymentModeId 
+        ? (tx.paymentModeId._id || tx.paymentModeId.toString() || tx.paymentModeId)
+        : null;
+      
+      return {
+        id: tx._id,
+        type: 'Transactions',
+        date: tx.createdAt,
+        createdAt: tx.createdAt,
+        sender: tx.sender ? {
+          id: tx.sender._id,
+          name: tx.sender.name,
+          email: tx.sender.email,
+          role: tx.sender.role
+        } : null,
+        receiver: tx.receiver ? {
+          id: tx.receiver._id,
+          name: tx.receiver.name,
+          email: tx.receiver.email,
+          role: tx.receiver.role
+        } : null,
+        initiatedBy: tx.initiatedBy ? {
+          id: tx.initiatedBy._id,
+          name: tx.initiatedBy.name,
+          email: tx.initiatedBy.email,
+          role: tx.initiatedBy.role
+        } : null,
+        approvedBy: tx.approvedBy ? {
+          id: tx.approvedBy._id,
+          name: tx.approvedBy.name,
+          email: tx.approvedBy.email,
+          role: tx.approvedBy.role
+        } : null,
+        createdBy: tx.initiatedBy ? {
+          id: tx.initiatedBy._id,
+          name: tx.initiatedBy.name,
+          email: tx.initiatedBy.email,
+          role: tx.initiatedBy.role
+        } : null,
+        from: tx.sender ? tx.sender.name : 'Unknown',
+        to: tx.receiver ? tx.receiver.name : 'Unknown',
+        amount: tx.amount,
+        mode: tx.mode,
+        paymentModeId: paymentModeIdValue,
+        paymentMode: paymentMode,
+        purpose: tx.purpose || '',
+        status: tx.status,
+        proofUrl: tx.proofUrl || null,
+        flagReason: tx.flagReason || null,
+        isAutoPay: tx.isAutoPay,
+        isSystemTransaction: tx.isSystemTransaction || false
+      };
     }));
 
     // Transform collections and ensure they match the selected account
@@ -1503,8 +1584,8 @@ exports.getWalletReport = async (req, res) => {
     let includedCollectionsCount = 0;
     let excludedCollectionsCount = 0;
     
-    const transformedCollections = collections
-      .map(col => {
+    const transformedCollectionsRaw = await Promise.all(collections
+      .map(async (col) => {
         // ========================================================================
         // CRITICAL: Prevent double counting for ALL wallet reports
         // ========================================================================
@@ -1621,12 +1702,7 @@ exports.getWalletReport = async (req, res) => {
             email: col.collectedBy.email,
             role: col.collectedBy.role
           } : null),
-          paymentMode: col.paymentModeId ? {
-            id: col.paymentModeId._id,
-            modeName: col.paymentModeId.modeName,
-            description: col.paymentModeId.description,
-            autoPay: col.paymentModeId.autoPay
-          } : null,
+          paymentMode: await getPaymentModeObject(col.paymentModeId, true), // Include autoPay for collections
           voucherNumber: col.voucherNumber,
           customerName: col.customerName,
           from: col.from ? col.from.name : (col.collectedBy ? col.collectedBy.name : 'Unknown'),
@@ -1644,7 +1720,10 @@ exports.getWalletReport = async (req, res) => {
           parentCollectionId: col.parentCollectionId || null
         };
       })
-      .filter(col => col !== null); // Remove null entries (collections that don't match)
+    );
+    
+    // Remove null entries (collections that don't match)
+    const transformedCollections = transformedCollectionsRaw.filter(col => col !== null);
     
     console.log(`✅ [WALLET REPORT] Collections filtering complete:`);
     console.log(`   Total collections queried: ${collections.length}`);
@@ -1658,11 +1737,13 @@ exports.getWalletReport = async (req, res) => {
     }
 
     // Transform WalletTransactions (only for All Accounts Report)
-    const transformedWalletTransactions = includeWalletTransactions && walletTransactions ? walletTransactions
-      // Skip wallet ledger rows that already have a corresponding Transaction entry
-      // so each transfer appears only once in the combined table.
-      .filter(wt => (wt?.type || '').toLowerCase() !== 'transaction')
-      .map(wt => {
+    const transformedWalletTransactionsRaw = includeWalletTransactions && walletTransactions 
+      ? await Promise.all(
+          walletTransactions
+          // Skip wallet ledger rows that already have a corresponding Transaction entry
+          // so each transfer appears only once in the combined table.
+          .filter(wt => (wt?.type || '').toLowerCase() !== 'transaction')
+          .map(async (wt) => {
         // Extract accountId from notes
         // Format: "Amount added to account {accountId} by SuperAdmin" or "Amount withdrawn from account {accountId} by SuperAdmin"
         let extractedAccountId = null;
@@ -1745,12 +1826,8 @@ exports.getWalletReport = async (req, res) => {
           to: toName,
           amount: wt.amount,
           mode: wt.mode,
-          paymentModeId: wt.paymentModeId ? (wt.paymentModeId._id || wt.paymentModeId) : null,
-          paymentMode: (wt.paymentModeId && typeof wt.paymentModeId === 'object' && wt.paymentModeId.modeName) ? {
-            _id: wt.paymentModeId._id || wt.paymentModeId,
-            modeName: wt.paymentModeId.modeName,
-            description: wt.paymentModeId.description
-          } : null,
+          paymentModeId: wt.paymentModeId ? (wt.paymentModeId._id || wt.paymentModeId.toString() || wt.paymentModeId) : null,
+          paymentMode: await getPaymentModeObject(wt.paymentModeId),
           status: 'Completed', // WalletTransactions are always completed when in report
           accountId: extractedAccountId,
           accountName: accountName,
@@ -1758,8 +1835,12 @@ exports.getWalletReport = async (req, res) => {
           operation: wt.operation, // 'add' or 'subtract'
           walletTransactionType: wt.type // Keep original type for reference
         };
-      })
-      .filter(wt => {
+          })
+        )
+      : [];
+    
+    // Apply filtering to transformed wallet transactions
+    const transformedWalletTransactions = transformedWalletTransactionsRaw.filter(wt => {
         // ========================================================================
         // STRICT WALLET TRANSACTION FILTERING - Double check accountId match
         // ========================================================================
@@ -1787,7 +1868,7 @@ exports.getWalletReport = async (req, res) => {
           return extractedAccountId === selectedAccountId;
         }
         return true;
-      }) : [];
+      });
 
     // Debug: Verify paymentMode in transformed WalletTransactions
     if (transformedWalletTransactions && transformedWalletTransactions.length > 0) {
