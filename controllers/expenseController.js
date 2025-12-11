@@ -668,6 +668,11 @@ exports.approveExpense = async (req, res) => {
     expense.status = 'Approved';
     expense.approvedBy = req.user._id;
     expense.approvedAt = new Date();
+    // Save the Payment Mode ID that paid for this expense
+    if (firstPaymentMode && !wasAlreadyApproved) {
+      expense.paymentModeId = firstPaymentMode._id;
+      console.log(`[Expense Approval] ✅ Saved paymentModeId: ${firstPaymentMode._id} (${firstPaymentMode.modeName}) to expense`);
+    }
     await expense.save();
 
     // Create WalletTransaction entries with accountId in notes
@@ -837,22 +842,42 @@ exports.rejectExpense = async (req, res) => {
     // If expense was approved, reverse wallet changes before rejecting
     const wasApproved = expense.status === 'Approved' || expense.status === 'Completed';
     if (wasApproved) {
-      // Reverse Payment Mode wallet (add back the amount that was deducted) - use Payment Mode index 0
+      // Reverse Payment Mode wallet (add back the amount that was deducted)
+      // Use expense.paymentModeId if available (for new expenses), otherwise fall back to first Payment Mode (for old expenses)
       const PaymentMode = require('../models/paymentModeModel');
-      const firstPaymentMode = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
-      if (firstPaymentMode) {
-        const hasCollectionDisplay = firstPaymentMode.display && firstPaymentMode.display.includes('Collection');
+      let paymentModeToReverse = null;
+      
+      // Try to use the expense's paymentModeId first (for expenses approved after this fix)
+      if (expense.paymentModeId) {
+        paymentModeToReverse = await PaymentMode.findById(expense.paymentModeId);
+        if (paymentModeToReverse && paymentModeToReverse.isActive) {
+          console.log(`[Expense Reject] Using expense.paymentModeId: ${expense.paymentModeId} (${paymentModeToReverse.modeName})`);
+        } else {
+          paymentModeToReverse = null; // Fall back to first Payment Mode if saved ID is invalid
+        }
+      }
+      
+      // Fall back to first Payment Mode (for old expenses that don't have paymentModeId)
+      if (!paymentModeToReverse) {
+        paymentModeToReverse = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
+        if (paymentModeToReverse) {
+          console.log(`[Expense Reject] Using fallback first Payment Mode: ${paymentModeToReverse._id} (${paymentModeToReverse.modeName})`);
+        }
+      }
+      
+      if (paymentModeToReverse) {
+        const hasCollectionDisplay = paymentModeToReverse.display && paymentModeToReverse.display.includes('Collection');
         if (hasCollectionDisplay) {
-          // Extract mode from first Payment Mode's description (default to 'Cash' if not found)
+          // Extract mode from Payment Mode's description (default to 'Cash' if not found)
           let expenseMode = 'Cash';
-          if (firstPaymentMode.description) {
-            const modeMatch = firstPaymentMode.description.match(/mode:(\w+)/i);
+          if (paymentModeToReverse.description) {
+            const modeMatch = paymentModeToReverse.description.match(/mode:(\w+)/i);
             if (modeMatch && modeMatch[1]) {
               expenseMode = modeMatch[1];
             }
           }
-          await updatePaymentModeWalletBalance(firstPaymentMode._id, expenseMode, expense.amount, 'add', 'expense_rejection');
-          console.log(`[Expense Reject] Reversed Payment Mode wallet: +₹${expense.amount} to Payment Mode index 0 (${firstPaymentMode.modeName})`);
+          await updatePaymentModeWalletBalance(paymentModeToReverse._id, expenseMode, expense.amount, 'add', 'expense_rejection');
+          console.log(`[Expense Reject] Reversed Payment Mode wallet: +₹${expense.amount} to Payment Mode (${paymentModeToReverse.modeName})`);
         }
       }
       
@@ -866,6 +891,8 @@ exports.rejectExpense = async (req, res) => {
     if (wasApproved) {
       expense.approvedBy = undefined;
       expense.approvedAt = undefined;
+      // Clear paymentModeId when rejecting (since the reversal was done, we don't need to track it anymore)
+      expense.paymentModeId = undefined;
     }
     await expense.save();
 
@@ -956,23 +983,43 @@ exports.unapproveExpense = async (req, res) => {
     const expenseUserId = typeof expense.userId === 'object' ? expense.userId._id : expense.userId;
     const previousStatus = expense.status;
     
-    // Reverse Payment Mode wallet (add back the amount that was deducted) - use Payment Mode index 0
+    // Reverse Payment Mode wallet (add back the amount that was deducted)
+    // Use expense.paymentModeId if available (for new expenses), otherwise fall back to first Payment Mode (for old expenses)
     let paymentModeWallet = null;
     const PaymentMode = require('../models/paymentModeModel');
-    const firstPaymentMode = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
-    if (firstPaymentMode && firstPaymentMode.isActive) {
-      const hasCollectionDisplay = firstPaymentMode.display && firstPaymentMode.display.includes('Collection');
+    let paymentModeToReverse = null;
+    
+    // Try to use the expense's paymentModeId first (for expenses approved after this fix)
+    if (expense.paymentModeId) {
+      paymentModeToReverse = await PaymentMode.findById(expense.paymentModeId);
+      if (paymentModeToReverse && paymentModeToReverse.isActive) {
+        console.log(`[Expense Unapprove] Using expense.paymentModeId: ${expense.paymentModeId} (${paymentModeToReverse.modeName})`);
+      } else {
+        paymentModeToReverse = null; // Fall back to first Payment Mode if saved ID is invalid
+      }
+    }
+    
+    // Fall back to first Payment Mode (for old expenses that don't have paymentModeId)
+    if (!paymentModeToReverse) {
+      paymentModeToReverse = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
+      if (paymentModeToReverse) {
+        console.log(`[Expense Unapprove] Using fallback first Payment Mode: ${paymentModeToReverse._id} (${paymentModeToReverse.modeName})`);
+      }
+    }
+    
+    if (paymentModeToReverse && paymentModeToReverse.isActive) {
+      const hasCollectionDisplay = paymentModeToReverse.display && paymentModeToReverse.display.includes('Collection');
       if (hasCollectionDisplay) {
-        // Extract mode from first Payment Mode's description (default to 'Cash' if not found)
+        // Extract mode from Payment Mode's description (default to 'Cash' if not found)
         let expenseMode = 'Cash';
-        if (firstPaymentMode.description) {
-          const modeMatch = firstPaymentMode.description.match(/mode:(\w+)/i);
+        if (paymentModeToReverse.description) {
+          const modeMatch = paymentModeToReverse.description.match(/mode:(\w+)/i);
           if (modeMatch && modeMatch[1]) {
             expenseMode = modeMatch[1];
           }
         }
-        paymentModeWallet = await updatePaymentModeWalletBalance(firstPaymentMode._id, expenseMode, expense.amount, 'add', 'expense_reversal');
-        console.log(`[Expense Unapprove] Reversed Payment Mode wallet: +₹${expense.amount} to Payment Mode index 0 (${firstPaymentMode.modeName})`);
+        paymentModeWallet = await updatePaymentModeWalletBalance(paymentModeToReverse._id, expenseMode, expense.amount, 'add', 'expense_reversal');
+        console.log(`[Expense Unapprove] Reversed Payment Mode wallet: +₹${expense.amount} to Payment Mode (${paymentModeToReverse.modeName})`);
       }
     }
     
@@ -987,6 +1034,8 @@ exports.unapproveExpense = async (req, res) => {
     expense.status = 'Pending';
     expense.approvedBy = undefined;
     expense.approvedAt = undefined;
+    // Clear paymentModeId when unapproving (since the reversal was done, we don't need to track it anymore)
+    expense.paymentModeId = undefined;
     await expense.save();
 
     // Emit dashboard summary update

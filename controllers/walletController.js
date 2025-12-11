@@ -93,6 +93,21 @@ const extractModeFromPaymentMode = (paymentMode) => {
 // Helper function to create wallet transaction entry
 const createWalletTransaction = async (wallet, type, mode, amount, operation, performedBy, options = {}) => {
   try {
+    // Validate and convert paymentModeId if provided
+    let finalPaymentModeId = null;
+    if (options.paymentModeId) {
+      const mongoose = require('mongoose');
+      if (typeof options.paymentModeId === 'string' && mongoose.Types.ObjectId.isValid(options.paymentModeId.trim())) {
+        finalPaymentModeId = options.paymentModeId.trim();
+        console.log(`[createWalletTransaction] ✅ Saving paymentModeId: ${finalPaymentModeId}`);
+      } else if (options.paymentModeId instanceof mongoose.Types.ObjectId) {
+        finalPaymentModeId = options.paymentModeId;
+        console.log(`[createWalletTransaction] ✅ Saving paymentModeId (ObjectId): ${finalPaymentModeId}`);
+      } else {
+        console.log(`[createWalletTransaction] ⚠️  Invalid paymentModeId format: ${options.paymentModeId}`);
+      }
+    }
+    
     const transaction = await WalletTransaction.create({
       userId: wallet.userId,
       walletId: wallet._id,
@@ -100,6 +115,7 @@ const createWalletTransaction = async (wallet, type, mode, amount, operation, pe
       mode,
       amount,
       operation,
+      paymentModeId: finalPaymentModeId,
       fromMode: options.fromMode || null,
       toMode: options.toMode || null,
       fromUserId: options.fromUserId || null,
@@ -117,6 +133,7 @@ const createWalletTransaction = async (wallet, type, mode, amount, operation, pe
       status: 'completed'
     });
 
+    console.log(`[createWalletTransaction] ✅ WalletTransaction created with paymentModeId: ${transaction.paymentModeId || 'null'}`);
     return transaction;
   } catch (error) {
     console.error('Error creating wallet transaction:', error);
@@ -292,7 +309,10 @@ exports.addAmount = async (req, res) => {
       amount,
       'add',
       req.user._id,
-      { notes: notes || defaultNotes }
+      { 
+        notes: notes || defaultNotes,
+        paymentModeId: paymentModeId
+      }
     );
 
     await createAuditLog(
@@ -460,7 +480,10 @@ exports.withdrawAmount = async (req, res) => {
       amount,
       'subtract',
       req.user._id,
-      { notes: notes || defaultNotes }
+      { 
+        notes: notes || defaultNotes,
+        paymentModeId: paymentModeId
+      }
     );
 
     await createAuditLog(
@@ -844,10 +867,63 @@ exports.getWalletReport = async (req, res) => {
       collectionFilter.createdAt = { ...dateRange };
     }
 
-    if (mode) {
-      expenseFilter.mode = mode;
-      transactionFilter.mode = mode;
-      collectionFilter.mode = mode;
+    // Apply mode filter - Filter by paymentModeId.modeName (not mode field)
+    // Frontend sends modeName (e.g., "Online", "Pay Cash") and we filter by paymentModeId
+    // Only apply if accountId is not provided (accountId filter takes precedence)
+    if (mode && mode !== 'All' && mode.trim() !== '' && !accountId) {
+      const modeName = mode.trim();
+      console.log('🔍 [WALLET REPORT] Mode filter received:', modeName);
+      
+      // Try to find payment mode by modeName
+      const PaymentMode = require('../models/paymentModeModel');
+      try {
+        const paymentMode = await PaymentMode.findOne({ 
+          modeName: modeName,
+          isActive: { $ne: false } // Only active payment modes
+        }).lean();
+        
+        if (paymentMode) {
+          // Filter by paymentModeId (exact match)
+          const paymentModeId = new mongoose.Types.ObjectId(paymentMode._id);
+          console.log('✅ [WALLET REPORT] Found payment mode by modeName:', modeName, '→ paymentModeId:', paymentModeId.toString());
+          
+          // Filter ONLY by paymentModeId (exact match)
+          // DO NOT use mode field fallback because it's too broad:
+          // - "PAY CASH" and "CASH ONE" both have mode="Cash"
+          // - Using mode fallback would show items from ALL payment modes with same mode type
+          // - We want ONLY items with this specific paymentModeId
+          console.log('✅ [WALLET REPORT] Filtering ONLY by paymentModeId (exact match, no mode field fallback)');
+          
+          // Apply paymentModeId filter to expenses, transactions, collections, and wallet transactions
+          expenseFilter.paymentModeId = paymentModeId;
+          transactionFilter.paymentModeId = paymentModeId;
+          collectionFilter.paymentModeId = paymentModeId;
+          
+          // For wallet transactions, also filter by paymentModeId
+          // Wallet transactions have paymentModeId field, so we can filter directly
+          if (includeWalletTransactions && walletTransactionFilter) {
+            walletTransactionFilter.paymentModeId = paymentModeId;
+          }
+          
+          console.log('✅ [WALLET REPORT] Applied paymentModeId filter (exact match only):', paymentModeId.toString());
+        } else {
+          // Fallback: If payment mode not found by modeName, try filtering by mode field
+          // This handles backward compatibility for old mode values (Cash, UPI, Bank)
+          console.log('⚠️  [WALLET REPORT] Payment mode not found by modeName:', modeName, '- Falling back to mode field filter');
+          expenseFilter.mode = modeName;
+          transactionFilter.mode = modeName;
+          collectionFilter.mode = modeName;
+        }
+      } catch (error) {
+        console.error('❌ [WALLET REPORT] Error finding payment mode:', error);
+        // Fallback to mode field filter
+        expenseFilter.mode = modeName;
+        transactionFilter.mode = modeName;
+        collectionFilter.mode = modeName;
+      }
+    } else if (mode && mode !== 'All' && mode.trim() !== '' && accountId) {
+      // If accountId is provided, mode filter is ignored (accountId filter takes precedence)
+      console.log('⚠️  [WALLET REPORT] Mode filter ignored - accountId filter takes precedence');
     }
 
     // ============================================================================
@@ -1149,8 +1225,19 @@ exports.getWalletReport = async (req, res) => {
       }
       
       // Apply mode filter if provided (from account filter or mode parameter)
+      // Note: When mode is a modeName (like "ONLINE", "PAY CASH"), paymentModeId filter is already applied above
+      // Wallet transactions have paymentModeId field, so they will be filtered by paymentModeId
       if (accountModeType) {
         walletTransactionFilter.mode = accountModeType;
+      } else if (mode && mode !== 'All' && mode.trim() !== '' && !accountId) {
+        // Check if paymentModeId filter was already applied (from mode filter section above)
+        // If yes, wallet transactions will be filtered by paymentModeId
+        // If no, fallback to mode field filter
+        if (!walletTransactionFilter.paymentModeId) {
+          walletTransactionFilter.mode = mode;
+        } else {
+          console.log('✅ [WALLET REPORT] Wallet transactions filtered by paymentModeId:', walletTransactionFilter.paymentModeId.toString());
+        }
       } else if (mode) {
         walletTransactionFilter.mode = mode;
       }
@@ -1281,6 +1368,7 @@ exports.getWalletReport = async (req, res) => {
             .populate('fromUserId', 'name email')
             .populate('toUserId', 'name email')
             .populate('walletId')
+            .populate('paymentModeId', 'modeName description')
             .sort({ createdAt: -1 })
         : []
     ]);
@@ -1296,6 +1384,20 @@ exports.getWalletReport = async (req, res) => {
     console.log('   Wallet Transactions:', walletTransactions?.length || 0, 'records');
     if (accountId) {
       console.log('     → Filtered by accountId in notes:', accountId);
+    }
+    // Debug: Check paymentModeId population for WalletTransactions
+    if (walletTransactions && walletTransactions.length > 0) {
+      console.log('   🔍 [WALLET REPORT] Checking paymentModeId population for WalletTransactions:');
+      walletTransactions.slice(0, 3).forEach((wt, idx) => {
+        console.log(`     WalletTransaction ${idx + 1} (ID: ${wt._id}):`);
+        console.log(`       type: ${wt.type}, mode: ${wt.mode}`);
+        console.log(`       paymentModeId (raw): ${wt.paymentModeId}`);
+        if (wt.paymentModeId && wt.paymentModeId.modeName) {
+          console.log(`       ✅ paymentMode populated - modeName: ${wt.paymentModeId.modeName}`);
+        } else {
+          console.log(`       ⚠️  paymentMode NOT populated or paymentModeId is null`);
+        }
+      });
     }
     console.log('═══════════════════════════════════════════════════════════');
 
@@ -1379,7 +1481,7 @@ exports.getWalletReport = async (req, res) => {
       amount: tx.amount,
       mode: tx.mode,
       paymentModeId: tx.paymentModeId || null,
-      paymentMode: tx.paymentModeId ? {
+      paymentMode: (tx.paymentModeId && typeof tx.paymentModeId === 'object' && tx.paymentModeId.modeName) ? {
         _id: tx.paymentModeId._id,
         modeName: tx.paymentModeId.modeName,
         description: tx.paymentModeId.description
@@ -1643,6 +1745,12 @@ exports.getWalletReport = async (req, res) => {
           to: toName,
           amount: wt.amount,
           mode: wt.mode,
+          paymentModeId: wt.paymentModeId ? (wt.paymentModeId._id || wt.paymentModeId) : null,
+          paymentMode: (wt.paymentModeId && typeof wt.paymentModeId === 'object' && wt.paymentModeId.modeName) ? {
+            _id: wt.paymentModeId._id || wt.paymentModeId,
+            modeName: wt.paymentModeId.modeName,
+            description: wt.paymentModeId.description
+          } : null,
           status: 'Completed', // WalletTransactions are always completed when in report
           accountId: extractedAccountId,
           accountName: accountName,
@@ -1680,6 +1788,21 @@ exports.getWalletReport = async (req, res) => {
         }
         return true;
       }) : [];
+
+    // Debug: Verify paymentMode in transformed WalletTransactions
+    if (transformedWalletTransactions && transformedWalletTransactions.length > 0) {
+      console.log('🔍 [WALLET REPORT] Transformed WalletTransactions paymentMode check:');
+      transformedWalletTransactions.slice(0, 3).forEach((wt, idx) => {
+        console.log(`   WalletTransaction ${idx + 1} (ID: ${wt.id}):`);
+        console.log(`     type: ${wt.type}, mode: ${wt.mode}`);
+        console.log(`     paymentModeId: ${wt.paymentModeId || 'null'}`);
+        if (wt.paymentMode && wt.paymentMode.modeName) {
+          console.log(`     ✅ paymentMode.modeName: ${wt.paymentMode.modeName}`);
+        } else {
+          console.log(`     ⚠️  paymentMode: NOT INCLUDED or modeName missing`);
+        }
+      });
+    }
 
     const combined = [
       ...transformedExpenses,
@@ -2465,12 +2588,79 @@ exports.getSelfWalletReport = async (req, res) => {
       walletTransactionFilter.createdAt = { ...dateRange };
     }
 
-    // Apply mode filter (Cash, UPI, Bank)
+    // Apply mode filter - Filter by paymentModeId.modeName (not mode field)
+    // Frontend sends modeName (e.g., "Online", "Pay Cash") and we filter by paymentModeId
     if (mode && mode !== 'All' && mode.trim() !== '') {
-      expenseFilter.mode = mode.trim();
-      transactionFilter.mode = mode.trim();
-      collectionFilter.mode = mode.trim();
-      walletTransactionFilter.mode = mode.trim();
+      const modeName = mode.trim();
+      console.log('🔍 [SELF WALLET] Mode filter received:', modeName);
+      
+      // Try to find payment mode by modeName
+      const PaymentMode = require('../models/paymentModeModel');
+      try {
+        const paymentMode = await PaymentMode.findOne({ 
+          modeName: modeName,
+          isActive: { $ne: false } // Only active payment modes
+        }).lean();
+        
+        if (paymentMode) {
+          // Filter by paymentModeId (exact match)
+          const paymentModeId = new mongoose.Types.ObjectId(paymentMode._id);
+          console.log('✅ [SELF WALLET] Found payment mode by modeName:', modeName, '→ paymentModeId:', paymentModeId.toString());
+          
+          // Filter ONLY by paymentModeId (exact match)
+          // DO NOT use mode field fallback because it's too broad:
+          // - "PAY CASH" and "CASH ONE" both have mode="Cash"
+          // - Using mode fallback would show items from ALL payment modes with same mode type
+          // - We want ONLY items with this specific paymentModeId
+          console.log('✅ [SELF WALLET] Filtering ONLY by paymentModeId (exact match, no mode field fallback)');
+          
+          // For expenses: Combine userId condition with paymentModeId filter
+          expenseFilter.$and = [
+            { userId: expenseFilter.userId },
+            { paymentModeId: paymentModeId }
+          ];
+          delete expenseFilter.userId; // Remove from top level since it's now in $and
+          
+          // For transactions: Combine $or condition (sender/receiver) with paymentModeId filter
+          transactionFilter.$and = [
+            { $or: transactionFilter.$or },
+            { paymentModeId: paymentModeId }
+          ];
+          delete transactionFilter.$or; // Remove from top level since it's now in $and
+          
+          // For collections: Combine $or condition (collectedBy/assignedReceiver) with paymentModeId filter
+          collectionFilter.$and = [
+            { $or: collectionFilter.$or },
+            { paymentModeId: paymentModeId }
+          ];
+          delete collectionFilter.$or; // Remove from top level since it's now in $and
+          
+          // For wallet transactions: Combine userId and status with paymentModeId filter
+          walletTransactionFilter.$and = [
+            { userId: walletTransactionFilter.userId, status: walletTransactionFilter.status },
+            { paymentModeId: paymentModeId }
+          ];
+          delete walletTransactionFilter.userId; // Remove from top level
+          delete walletTransactionFilter.status; // Remove from top level
+          
+          console.log('✅ [SELF WALLET] Applied paymentModeId filter (exact match only):', paymentModeId.toString());
+        } else {
+          // Fallback: If payment mode not found by modeName, try filtering by mode field
+          // This handles backward compatibility for old mode values (Cash, UPI, Bank)
+          console.log('⚠️  [SELF WALLET] Payment mode not found by modeName:', modeName, '- Falling back to mode field filter');
+          expenseFilter.mode = modeName;
+          transactionFilter.mode = modeName;
+          collectionFilter.mode = modeName;
+          walletTransactionFilter.mode = modeName;
+        }
+      } catch (error) {
+        console.error('❌ [SELF WALLET] Error finding payment mode:', error);
+        // Fallback to mode field filter
+        expenseFilter.mode = modeName;
+        transactionFilter.mode = modeName;
+        collectionFilter.mode = modeName;
+        walletTransactionFilter.mode = modeName;
+      }
     }
 
     // Apply status filter
@@ -2559,6 +2749,7 @@ exports.getSelfWalletReport = async (req, res) => {
           .populate('performedBy', 'name email')
           .populate('fromUserId', 'name email')
           .populate('toUserId', 'name email')
+          .populate('paymentModeId', 'modeName description')
           .sort({ createdAt: -1 })
           .lean()
       );
@@ -3211,7 +3402,7 @@ exports.getSelfWalletReport = async (req, res) => {
         ...t,
         dataType: 'Transaction',
         type: 'Transactions', // Add type field for frontend filtering (plural form)
-        paymentMode: t.paymentModeId ? {
+        paymentMode: (t.paymentModeId && typeof t.paymentModeId === 'object' && t.paymentModeId.modeName) ? {
           _id: t.paymentModeId._id,
           modeName: t.paymentModeId.modeName,
           description: t.paymentModeId.description
@@ -3236,7 +3427,12 @@ exports.getSelfWalletReport = async (req, res) => {
       allData.push({
         ...wt,
         dataType: 'WalletTransaction',
-        type: 'WalletTransactions' // Add type field for frontend filtering (plural form)
+        type: 'WalletTransactions', // Add type field for frontend filtering (plural form)
+        paymentMode: (wt.paymentModeId && typeof wt.paymentModeId === 'object' && wt.paymentModeId.modeName) ? {
+          _id: wt.paymentModeId._id || wt.paymentModeId,
+          modeName: wt.paymentModeId.modeName,
+          description: wt.paymentModeId.description
+        } : null
       });
     });
 
@@ -3487,7 +3683,8 @@ exports.addAmountToAccount = async (req, res) => {
         notes: remark || (req.user.role === 'SuperAdmin' 
           ? `Amount added to account ${accountId} by SuperAdmin`
           : `Amount added to account ${accountId} by ${req.user.name || 'User'}`),
-        accountId: accountId
+        accountId: accountId,
+        paymentModeId: accountId // accountId is the paymentModeId, save it to paymentModeId field
       }
     );
 
@@ -3636,7 +3833,8 @@ exports.withdrawFromAccount = async (req, res) => {
       req.user._id,
       { 
         notes: remark || defaultRemark,
-        accountId: accountId
+        accountId: accountId,
+        paymentModeId: accountId // accountId is the paymentModeId, save it to paymentModeId field
       }
     );
 

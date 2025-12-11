@@ -229,22 +229,39 @@ exports.createTransaction = async (req, res) => {
     
     // Validate and convert paymentModeId if provided
     let finalPaymentModeId = null;
+    console.log('\n🔍 [PAYMENT MODE ID VALIDATION]');
+    console.log('   Raw paymentModeId from request:', paymentModeId);
+    console.log('   paymentModeId type:', typeof paymentModeId);
+    console.log('   paymentModeId === null:', paymentModeId === null);
+    console.log('   paymentModeId === undefined:', paymentModeId === undefined);
+    console.log('   paymentModeId === "":', paymentModeId === '');
+    
     if (paymentModeId) {
       // Check if paymentModeId is a valid ObjectId string
       if (typeof paymentModeId === 'string' && paymentModeId.trim() !== '') {
         const mongoose = require('mongoose');
-        if (mongoose.Types.ObjectId.isValid(paymentModeId.trim())) {
-          finalPaymentModeId = paymentModeId.trim();
+        const trimmedId = paymentModeId.trim();
+        console.log('   Trimmed paymentModeId:', trimmedId);
+        console.log('   Trimmed length:', trimmedId.length);
+        console.log('   Is valid ObjectId:', mongoose.Types.ObjectId.isValid(trimmedId));
+        
+        if (mongoose.Types.ObjectId.isValid(trimmedId)) {
+          finalPaymentModeId = trimmedId;
           console.log('   ✅ Valid paymentModeId provided:', finalPaymentModeId);
         } else {
           console.log('   ⚠️  Invalid paymentModeId format (not a valid ObjectId):', paymentModeId);
+          console.log('   ⚠️  Trimmed value:', trimmedId);
         }
       } else {
         console.log('   ⚠️  paymentModeId is not a valid string:', paymentModeId);
+        console.log('   ⚠️  Type:', typeof paymentModeId);
+        console.log('   ⚠️  Value:', JSON.stringify(paymentModeId));
       }
     } else {
-      console.log('   ℹ️  No paymentModeId provided');
+      console.log('   ℹ️  No paymentModeId provided (null, undefined, or empty)');
     }
+    console.log('   Final paymentModeId to save:', finalPaymentModeId);
+    console.log('🔍 [END PAYMENT MODE ID VALIDATION]\n');
     
     // ALL transactions start as "Pending" - NO auto-approval for anyone
     // Only receiver can approve, which will update wallets
