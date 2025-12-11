@@ -1,5 +1,7 @@
 const Wallet = require('../models/walletModel');
 const User = require('../models/userModel');
+const WalletTransaction = require('../models/walletTransactionModel');
+const PaymentMode = require('../models/paymentModeModel');
 
 // Helper function to calculate totals from all wallets
 const calculateAllUsersTotals = async () => {
@@ -90,6 +92,39 @@ const toSafeNumber = (value) => {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+};
+
+// Helper function to get payment mode object
+const getPaymentModeObject = async (paymentModeId) => {
+  if (!paymentModeId) return null;
+  
+  // If paymentModeId is already populated (object with modeName), return it
+  if (typeof paymentModeId === 'object' && paymentModeId.modeName) {
+    return {
+      _id: paymentModeId._id || paymentModeId,
+      id: paymentModeId._id || paymentModeId,
+      modeName: paymentModeId.modeName,
+      description: paymentModeId.description || null
+    };
+  }
+  
+  // If paymentModeId is an ObjectId string or ObjectId, fetch from database
+  try {
+    const paymentMode = await PaymentMode.findById(paymentModeId).select('modeName description').lean();
+    
+    if (paymentMode && paymentMode.modeName) {
+      return {
+        _id: paymentMode._id || paymentModeId,
+        id: paymentMode._id || paymentModeId,
+        modeName: paymentMode.modeName,
+        description: paymentMode.description || null
+      };
+    }
+  } catch (error) {
+    console.error(`[getPaymentModeObject] Error fetching PaymentMode ${paymentModeId}:`, error.message);
+  }
+  
+  return null;
 };
 
 // @desc    Get aggregated totals for all users
@@ -203,12 +238,9 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
     console.log('   Full Query:', JSON.stringify(req.query, null, 2));
     console.log('═══════════════════════════════════════════════════════════');
     
-    // Check if accountId is provided but not handled
+    // Handle accountId filtering (accountId is the paymentModeId for Add Amount/Withdraw transactions)
     if (accountId) {
-      console.log('⚠️  [ALL WALLET REPORTS] WARNING: accountId parameter received but NOT processed!');
-      console.log('   accountId:', accountId);
-      console.log('   This endpoint does not support accountId filtering.');
-      console.log('   Consider using /api/wallet/report endpoint instead.');
+      console.log('📊 [ALL WALLET REPORTS] accountId filter provided:', accountId);
     }
     
     let report;
@@ -311,28 +343,182 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
       console.log(`✅ [ALL WALLET REPORTS] All users report calculated: CashIn=${report.cashIn}, CashOut=${report.cashOut}, Balance=${report.balance}, userCount=${userCount}`);
     }
     
-    // Note: Date filtering would require querying WalletTransaction collection
-    // For now, we return current wallet totals
-    // Future enhancement: Add date-based filtering using WalletTransaction
+    // Query WalletTransaction collection for Add Amount and Withdraw transactions
+    console.log('📊 [ALL WALLET REPORTS] Querying WalletTransaction collection...');
+    
+    const walletTransactionFilter = {
+      type: { $in: ['add', 'withdraw'] },
+      status: 'completed'
+    };
+    
+    // Apply userId filter if provided
+    if (userId) {
+      const userIds = userId.includes(',') 
+        ? userId.split(',').map(id => id.trim()).filter(id => id)
+        : [userId];
+      
+      if (userIds.length === 1) {
+        walletTransactionFilter.userId = userIds[0];
+      } else {
+        walletTransactionFilter.userId = { $in: userIds };
+      }
+    }
+    
+    // Apply date range filter if provided
+    if (startDate || endDate) {
+      walletTransactionFilter.createdAt = {};
+      if (startDate) {
+        walletTransactionFilter.createdAt.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        const endDateTime = new Date(endDate);
+        endDateTime.setHours(23, 59, 59, 999); // End of day
+        walletTransactionFilter.createdAt.$lte = endDateTime;
+      }
+    }
+    
+    // Apply accountId filter if provided (accountId is the paymentModeId)
+    if (accountId) {
+      const mongoose = require('mongoose');
+      if (mongoose.Types.ObjectId.isValid(accountId)) {
+        walletTransactionFilter.paymentModeId = accountId;
+        console.log(`📊 [ALL WALLET REPORTS] Filtering by accountId (paymentModeId): ${accountId}`);
+      } else {
+        console.log(`⚠️  [ALL WALLET REPORTS] Invalid accountId format: ${accountId}`);
+      }
+    }
+    
+    // Query WalletTransactions
+    const walletTransactions = await WalletTransaction.find(walletTransactionFilter)
+      .populate('userId', 'name email role')
+      .populate('performedBy', 'name email role')
+      .populate('paymentModeId', 'modeName description')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    console.log(`📊 [ALL WALLET REPORTS] Found ${walletTransactions.length} wallet transactions`);
+    
+    // Transform WalletTransactions to table format
+    const transformedTransactions = await Promise.all(
+      walletTransactions.map(async (wt) => {
+        // Extract accountId from notes if available
+        let extractedAccountId = null;
+        let accountName = 'Unknown Account';
+        
+        if (wt.notes) {
+          const accountMatch = wt.notes.match(/account\s+([^\s]+)/i);
+          if (accountMatch) {
+            extractedAccountId = accountMatch[1];
+          }
+        }
+        
+        // Get payment mode name
+        if (wt.paymentModeId) {
+          if (typeof wt.paymentModeId === 'object' && wt.paymentModeId.modeName) {
+            accountName = wt.paymentModeId.modeName;
+          } else {
+            const paymentMode = await getPaymentModeObject(wt.paymentModeId);
+            if (paymentMode) {
+              accountName = paymentMode.modeName;
+            }
+          }
+        }
+        
+        // Determine transaction type display
+        const typeDisplay = wt.type === 'add' ? 'Add Amount' : 'Withdraw';
+        
+        // Get performer name
+        const performerName = wt.performedBy 
+          ? (wt.performedBy.name || 'SuperAdmin')
+          : 'SuperAdmin';
+        
+        // Get user name
+        const userName = wt.userId 
+          ? (wt.userId.name || 'Unknown User')
+          : 'Unknown User';
+        
+        // Determine From → To display
+        // Add Amount: SuperAdmin (performer) → User's Wallet
+        // Withdraw: User's Wallet → SuperAdmin (performer)
+        const fromName = wt.type === 'add' ? performerName : `${userName}'s Wallet`;
+        const toName = wt.type === 'add' ? `${userName}'s Wallet` : performerName;
+        
+        return {
+          id: wt._id,
+          type: typeDisplay,
+          date: wt.createdAt,
+          createdAt: wt.createdAt,
+          user: wt.userId ? {
+            id: wt.userId._id,
+            name: wt.userId.name,
+            email: wt.userId.email,
+            role: wt.userId.role
+          } : null,
+          performedBy: wt.performedBy ? {
+            id: wt.performedBy._id,
+            name: wt.performedBy.name,
+            email: wt.performedBy.email,
+            role: wt.performedBy.role
+          } : null,
+          from: fromName,
+          to: toName,
+          amount: wt.amount,
+          mode: wt.mode,
+          paymentModeId: wt.paymentModeId ? (wt.paymentModeId._id || wt.paymentModeId.toString() || wt.paymentModeId) : null,
+          paymentMode: await getPaymentModeObject(wt.paymentModeId),
+          status: 'Completed',
+          accountId: extractedAccountId,
+          accountName: accountName,
+          notes: wt.notes || '',
+          operation: wt.operation,
+          walletTransactionType: wt.type
+        };
+      })
+    );
+    
+    // Calculate summary statistics for transactions
+    const addAmountCount = transformedTransactions.filter(t => t.type === 'Add Amount').length;
+    const addAmountTotal = transformedTransactions
+      .filter(t => t.type === 'Add Amount')
+      .reduce((sum, t) => sum + toSafeNumber(t.amount), 0);
+    
+    const withdrawCount = transformedTransactions.filter(t => t.type === 'Withdraw').length;
+    const withdrawTotal = transformedTransactions
+      .filter(t => t.type === 'Withdraw')
+      .reduce((sum, t) => sum + toSafeNumber(t.amount), 0);
+    
+    console.log(`📊 [ALL WALLET REPORTS] Transaction Summary:`);
+    console.log(`   Add Amount: ${addAmountCount} transactions, Total: ₹${addAmountTotal}`);
+    console.log(`   Withdraw: ${withdrawCount} transactions, Total: ₹${withdrawTotal}`);
     
     const response = {
       success: true,
-      report: report,
+      report: {
+        ...report,
+        addAmountCount,
+        addAmountTotal,
+        withdrawCount,
+        withdrawTotal
+      },
+      transactions: transformedTransactions,
       filters: {
         userId: userId || null,
         startDate: startDate || null,
         endDate: endDate || null,
-        accountId: accountId || null // Include accountId in response even if not processed
+        accountId: accountId || null
       },
       userCount: userCount,
+      transactionCount: transformedTransactions.length,
       lastUpdated: new Date().toISOString()
     };
     
     console.log('═══════════════════════════════════════════════════════════');
     console.log('📊 [ALL WALLET REPORTS] Response sent:');
     console.log('   success: true');
-    console.log('   report:', JSON.stringify(report, null, 2));
+    console.log('   report:', JSON.stringify(response.report, null, 2));
     console.log('   userCount:', userCount);
+    console.log('   transactionCount:', response.transactionCount);
+    console.log('   transactions:', transformedTransactions.length, 'entries');
     console.log('   filters:', JSON.stringify(response.filters, null, 2));
     console.log('═══════════════════════════════════════════════════════════');
     

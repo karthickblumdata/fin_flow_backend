@@ -156,6 +156,7 @@ const fetchPendingData = async ({
       .populate('initiatedBy', 'name email role')
       .populate('receiver', 'name email role')
       .populate('sender', 'name email role')
+      .populate('paymentModeId', 'modeName autoPay assignedReceiver description isActive')
       .populate('approvedBy', 'name email role')
       .sort({ createdAt: -1 })
       .lean();
@@ -173,6 +174,7 @@ const fetchPendingData = async ({
     expenseQuery = Expense.find(expenseFilter)
       .populate('createdBy', 'name email role')
       .populate('userId', 'name email role')
+      .populate('paymentModeId', 'modeName autoPay assignedReceiver description isActive')
       .populate('approvedBy', 'name email role')
       .sort({ createdAt: -1 })
       .lean();

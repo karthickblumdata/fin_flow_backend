@@ -8,6 +8,52 @@ const { buildQueryFromFilters, calculateReportSummary, validateReportFilters, ge
 const { getExpenseReport, getExpenseSummary } = require('../utils/expenseReportHelper');
 const { createAuditLog } = require('../utils/auditLogger');
 
+// Helper function to safely extract paymentMode object with fallback
+// If populate failed, this will fetch the PaymentMode from database
+const getPaymentModeObject = async (paymentModeId, includeAutoPay = false) => {
+  if (!paymentModeId) {
+    return null;
+  }
+  
+  // If paymentModeId is already populated (object with modeName), return it
+  if (typeof paymentModeId === 'object' && paymentModeId.modeName) {
+    const result = {
+      _id: paymentModeId._id || paymentModeId,
+      id: paymentModeId._id || paymentModeId,
+      modeName: paymentModeId.modeName,
+      description: paymentModeId.description || null
+    };
+    if (includeAutoPay && paymentModeId.autoPay !== undefined) {
+      result.autoPay = paymentModeId.autoPay;
+    }
+    return result;
+  }
+  
+  // If paymentModeId is an ObjectId string or ObjectId, fetch from database
+  try {
+    const PaymentMode = require('../models/paymentModeModel');
+    const selectFields = includeAutoPay ? 'modeName description autoPay' : 'modeName description';
+    const paymentMode = await PaymentMode.findById(paymentModeId).select(selectFields).lean();
+    
+    if (paymentMode && paymentMode.modeName) {
+      const result = {
+        _id: paymentMode._id || paymentModeId,
+        id: paymentMode._id || paymentModeId,
+        modeName: paymentMode.modeName,
+        description: paymentMode.description || null
+      };
+      if (includeAutoPay && paymentMode.autoPay !== undefined) {
+        result.autoPay = paymentMode.autoPay;
+      }
+      return result;
+    }
+  } catch (error) {
+    console.error(`[getPaymentModeObject] Error fetching PaymentMode ${paymentModeId}:`, error.message);
+  }
+  
+  return null;
+};
+
 // @desc    Get reports
 // @route   GET /api/reports
 // @access  Private (Admin, SuperAdmin)
@@ -60,13 +106,16 @@ exports.getReports = async (req, res) => {
       Transaction.find(transactionQuery)
         .populate('sender', 'name email')
         .populate('receiver', 'name email')
+        .populate('paymentModeId', 'modeName description')
         .sort({ createdAt: -1 }),
       Collection.find(collectionQuery)
         .populate('collectedBy', 'name email')
         .populate('assignedReceiver', 'name email')
+        .populate('paymentModeId', 'modeName description autoPay')
         .sort({ createdAt: -1 }),
       Expense.find(expenseQuery)
         .populate('userId', 'name email')
+        .populate('paymentModeId', 'modeName description')
         .sort({ createdAt: -1 })
     ]);
 
@@ -104,23 +153,106 @@ exports.getReports = async (req, res) => {
     const balance = cashIn - cashOut;
     const netFlow = totalCollections - totalExpenses;
 
+    // Transform transactions, collections, and expenses to include paymentMode
+    const transformedTransactions = await Promise.all(transactions.map(async (tx) => {
+      // Extract paymentMode BEFORE calling toObject() (to preserve populated object)
+      let paymentMode = null;
+      const paymentModeIdValue = tx.paymentModeId;
+      
+      if (paymentModeIdValue) {
+        // If already populated as object (from .populate()), use it directly
+        if (typeof paymentModeIdValue === 'object' && paymentModeIdValue.modeName) {
+          paymentMode = {
+            _id: paymentModeIdValue._id || paymentModeIdValue,
+            id: paymentModeIdValue._id || paymentModeIdValue,
+            modeName: paymentModeIdValue.modeName,
+            description: paymentModeIdValue.description || null
+          };
+        } else {
+          // If not populated or is ObjectId, fetch it
+          paymentMode = await getPaymentModeObject(paymentModeIdValue);
+        }
+      }
+      
+      const txObj = tx.toObject ? tx.toObject() : tx;
+      return {
+        ...txObj,
+        paymentMode: paymentMode
+      };
+    }));
+
+    const transformedCollections = await Promise.all(collections.map(async (col) => {
+      // Extract paymentMode BEFORE calling toObject() (to preserve populated object)
+      let paymentMode = null;
+      const paymentModeIdValue = col.paymentModeId;
+      
+      if (paymentModeIdValue) {
+        // If already populated as object (from .populate()), use it directly
+        if (typeof paymentModeIdValue === 'object' && paymentModeIdValue.modeName) {
+          paymentMode = {
+            _id: paymentModeIdValue._id || paymentModeIdValue,
+            id: paymentModeIdValue._id || paymentModeIdValue,
+            modeName: paymentModeIdValue.modeName,
+            description: paymentModeIdValue.description || null,
+            autoPay: paymentModeIdValue.autoPay
+          };
+        } else {
+          // If not populated or is ObjectId, fetch it
+          paymentMode = await getPaymentModeObject(paymentModeIdValue, true);
+        }
+      }
+      
+      const colObj = col.toObject ? col.toObject() : col;
+      return {
+        ...colObj,
+        paymentMode: paymentMode
+      };
+    }));
+
+    const transformedExpenses = await Promise.all(expenses.map(async (exp) => {
+      // Extract paymentMode BEFORE calling toObject() (to preserve populated object)
+      let paymentMode = null;
+      const paymentModeIdValue = exp.paymentModeId;
+      
+      if (paymentModeIdValue) {
+        // If already populated as object (from .populate()), use it directly
+        if (typeof paymentModeIdValue === 'object' && paymentModeIdValue.modeName) {
+          paymentMode = {
+            _id: paymentModeIdValue._id || paymentModeIdValue,
+            id: paymentModeIdValue._id || paymentModeIdValue,
+            modeName: paymentModeIdValue.modeName,
+            description: paymentModeIdValue.description || null
+          };
+        } else {
+          // If not populated or is ObjectId, fetch it
+          paymentMode = await getPaymentModeObject(paymentModeIdValue);
+        }
+      }
+      
+      const expObj = exp.toObject ? exp.toObject() : exp;
+      return {
+        ...expObj,
+        paymentMode: paymentMode
+      };
+    }));
+
     res.status(200).json({
       success: true,
       report: {
         transactions: {
           count: transactions.length,
           total: totalTransactions,
-          data: transactions
+          data: transformedTransactions
         },
         collections: {
           count: collections.length,
           total: totalCollections,
-          data: collections
+          data: transformedCollections
         },
         expenses: {
           count: expenses.length,
           total: totalExpenses,
-          data: expenses
+          data: transformedExpenses
         },
         summary: {
           cashIn,

@@ -511,6 +511,34 @@ exports.withdrawAmount = async (req, res) => {
     }
     const wallet = await updateWalletBalance(targetUserId, mode, amount, 'subtract', 'withdraw');
     
+    // Update Payment Mode wallet (if payment mode is active and has appropriate display settings)
+    let paymentModeWallet = null;
+    if (paymentMode && paymentMode.isActive) {
+      // Check if Payment Mode has Expenses or Transaction in display (withdrawals are money going out)
+      const hasExpensesDisplay = paymentMode.display && paymentMode.display.includes('Expenses');
+      const hasTransactionDisplay = paymentMode.display && paymentMode.display.includes('Transaction');
+      
+      if (hasExpensesDisplay || hasTransactionDisplay) {
+        const { updatePaymentModeWalletBalance } = require('../utils/walletHelper');
+        console.log(`\n   [Withdraw] Updating Payment Mode wallet (${paymentMode.modeName})...`);
+        try {
+          paymentModeWallet = await updatePaymentModeWalletBalance(
+            paymentModeId,
+            mode,
+            amount,
+            'subtract',
+            'withdraw'
+          );
+          console.log(`   ✅ Payment Mode Wallet Updated - CashIn: ₹${paymentModeWallet.cashIn}, CashOut: ₹${paymentModeWallet.cashOut}, Balance: ₹${paymentModeWallet.totalBalance} (-₹${amount})`);
+        } catch (error) {
+          console.error(`   ❌ Error updating Payment Mode wallet: ${error.message}`);
+          // Don't fail the withdrawal if Payment Mode wallet update fails
+        }
+      } else {
+        console.log(`   ⚠️  Payment Mode (${paymentMode.modeName}) does not have Expenses or Transaction in display - skipping Payment Mode wallet update`);
+      }
+    }
+    
     // Get user info for notification
     const targetUser = await User.findById(targetUserId);
 
@@ -1289,30 +1317,37 @@ exports.getWalletReport = async (req, res) => {
       }
       
       // ========================================================================
-      // WALLET TRANSACTIONS FILTERING - By accountId in notes
+      // WALLET TRANSACTIONS FILTERING - By accountId (paymentModeId)
       // ========================================================================
-      // When filtering by accountId, we filter wallet transactions by checking
-      // if the accountId appears in the notes field. The notes format is:
-      // "Amount added to account {accountId} by SuperAdmin" or
-      // "Amount withdrawn from account {accountId} by SuperAdmin"
+      // When filtering by accountId, we filter wallet transactions by:
+      // 1. paymentModeId field (primary filter - most reliable)
+      //    - Withdraw transactions store paymentModeId: accountId, so this will match them correctly
+      // 2. notes field regex (fallback for older transactions that might not have paymentModeId)
       //
       // This ensures:
       // - Sales UPI wallet transactions only show when Sales UPI is selected
       // - Purchase UPI wallet transactions only show when Purchase UPI is selected
       // - Complete separation of wallet transaction data between accounts
+      // - Withdraw transactions are correctly filtered by the account they were withdrawn from
+      // - Both the logged-in user's withdraw transactions AND the account's withdraw transactions show correctly
       // ========================================================================
       if (accountId) {
         console.log('🔍 [WALLET REPORT] Applying accountId filter to wallet transactions...');
         const accountIdString = accountId.toString();
-        // Escape special regex characters in accountId to prevent regex injection
+        const accountIdObjectId = new mongoose.Types.ObjectId(accountId);
+        
+        // Use $or to match either paymentModeId OR notes (for backward compatibility)
+        // This ensures withdraw transactions are found whether they have paymentModeId set or not
         const escapedAccountId = accountIdString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Match "account" followed by whitespace and then the exact accountId
-        // The (?:\\s|$) ensures we match complete accountId, not partial matches
-        walletTransactionFilter.notes = { 
-          $regex: new RegExp(`account\\s+${escapedAccountId}(?:\\s|$)`, 'i')
-        };
-        console.log('   Regex pattern:', `account\\s+${escapedAccountId}(?:\\s|$)`);
-        console.log('   This will match notes containing "account {accountId}"');
+        walletTransactionFilter.$or = [
+          { paymentModeId: accountIdObjectId },
+          { notes: { $regex: new RegExp(`account\\s+${escapedAccountId}(?:\\s|$)`, 'i') } }
+        ];
+        
+        console.log('   ✅ Primary filter: paymentModeId =', accountIdString);
+        console.log('   ✅ Fallback filter: notes regex pattern:', `account\\s+${escapedAccountId}(?:\\s|$)`);
+        console.log('   This will match transactions with paymentModeId matching accountId OR notes containing "account {accountId}"');
+        console.log('   Withdraw transactions will be correctly filtered by the account they were withdrawn from');
       }
     }
 
@@ -1845,27 +1880,41 @@ exports.getWalletReport = async (req, res) => {
         // STRICT WALLET TRANSACTION FILTERING - Double check accountId match
         // ========================================================================
         // Even though we filter by regex in the query, we do an additional strict check
-        // here to ensure the extracted accountId matches the selected accountId.
+        // here to ensure the accountId matches the selected accountId.
         // This provides an extra layer of security to ensure complete data separation.
         // 
         // IMPORTANT: When filtering by accountId:
-        // - Only include wallet transactions that have accountId in notes
-        // - Only include wallet transactions where extracted accountId matches selected accountId
-        // - Exclude wallet transactions without accountId in notes
+        // - Include wallet transactions where paymentModeId matches selected accountId (PRIMARY)
+        // - Include wallet transactions where extracted accountId from notes matches selected accountId (FALLBACK)
         // - Exclude wallet transactions with different accountId
+        // 
+        // NOTE: paymentModeId is the most reliable filter because:
+        // - Withdraw transactions store paymentModeId: accountId directly
+        // - Notes extraction might fail due to format variations
         // ========================================================================
         if (accountId) {
-          // Check if wallet transaction has accountId
-          if (!wt.accountId) {
-            return false; // Exclude wallet transactions without accountId
-          }
-          
-          // Only include wallet transactions where the extracted accountId exactly matches
-          // the selected accountId. This ensures complete separation between accounts.
-          const extractedAccountId = wt.accountId.toString();
           const selectedAccountId = accountId.toString();
           
-          return extractedAccountId === selectedAccountId;
+          // PRIMARY CHECK: paymentModeId match (most reliable)
+          // Withdraw transactions store paymentModeId: accountId, so this will match them correctly
+          if (wt.paymentModeId) {
+            const paymentModeIdStr = wt.paymentModeId.toString();
+            if (paymentModeIdStr === selectedAccountId) {
+              return true; // Match by paymentModeId - include this transaction
+            }
+          }
+          
+          // FALLBACK CHECK: accountId extracted from notes
+          // This handles older transactions that might not have paymentModeId set
+          if (wt.accountId) {
+            const extractedAccountId = wt.accountId.toString();
+            if (extractedAccountId === selectedAccountId) {
+              return true; // Match by extracted accountId from notes - include this transaction
+            }
+          }
+          
+          // No match - exclude this transaction
+          return false;
         }
         return true;
       });
@@ -1885,16 +1934,28 @@ exports.getWalletReport = async (req, res) => {
       });
     }
 
+    // Combine all data types - withdraw transactions are included by default
+    // Withdraw transactions are already filtered by accountId (paymentModeId) and will be displayed
     const combined = [
       ...transformedExpenses,
       ...transformedTransactions,
       ...transformedCollections,
-      ...transformedWalletTransactions
+      ...transformedWalletTransactions // Includes withdraw transactions by default
     ].sort((a, b) => {
+      // Sort by date (newest first) - withdraw transactions will appear in chronological order
       const first = new Date(a.date || a.createdAt || 0).getTime();
       const second = new Date(b.date || b.createdAt || 0).getTime();
       return second - first;
     });
+    
+    // Log withdraw transactions in combined array for Payment Mode display verification
+    if (accountId) {
+      const withdrawCount = combined.filter(item => 
+        item.type === 'Withdraw' || item.walletTransactionType === 'withdraw'
+      ).length;
+      console.log(`[Payment Mode Display] Total withdraw transactions in combined array: ${withdrawCount}`);
+      console.log(`[Payment Mode Display] All withdraw transactions will be displayed by default in Payment Mode view`);
+    }
 
     // ============================================================================
     // SUMMARY CALCULATION - Account-specific cash flow
@@ -2125,10 +2186,30 @@ exports.getWalletReport = async (req, res) => {
         }
       } else if (item.type === 'Add Amount' || item.type === 'Withdraw' || item.type === 'Transaction') {
         // Handle wallet transactions (Add Amount / Withdraw / Transaction)
-        if (normalized === 'completed') {
+        // NOTE: Wallet transactions always have status 'Completed', which normalizes to 'approved'
+        // So we check for 'approved' OR 'completed' to handle wallet transactions
+        if (normalized === 'completed' || normalized === 'approved' || item.status === 'Completed') {
           const walletTransactionType = item.walletTransactionType || item.type?.toLowerCase();
           
-          if (targetUserIds && targetUserIds.length > 1) {
+          // PRIORITY: Account filter (Payment Mode) takes precedence over user filters
+          // When accountId is set, we count transactions filtered by paymentModeId, not by userId
+          if (accountId) {
+            // Account filter view (Payment Mode): Count wallet transactions from combined array
+            // These are filtered by accountId (paymentModeId) and are in the combined array
+            // IMPORTANT: Withdraw transactions MUST be counted here for Payment Mode view
+            // This ensures Payment Mode shows correct Cash Out/Balance regardless of user filters
+            if (walletTransactionType === 'add' || (walletTransactionType === 'transaction' && item.operation === 'add')) {
+              cashIn += amount;
+              walletTxnCashIn += amount;
+              console.log(`[Payment Mode] ✅ Counted Add Amount: ₹${amount} (walletTransactionType: ${walletTransactionType})`);
+            } else if (walletTransactionType === 'withdraw' || (walletTransactionType === 'transaction' && item.operation === 'subtract')) {
+              cashOut += amount;
+              walletTxnCashOut += amount;
+              console.log(`[Payment Mode] ✅ Counted Withdraw: ₹${amount} (walletTransactionType: ${walletTransactionType}, operation: ${item.operation})`);
+            } else {
+              console.log(`[Payment Mode] ⚠️  Wallet transaction not counted - type: ${walletTransactionType}, operation: ${item.operation}`);
+            }
+          } else if (targetUserIds && targetUserIds.length > 1) {
             // Multiple users selected: Count wallet transactions for all selected users
             // Sum of each user's self wallet transaction values
             const wtUserId = item.userId?._id?.toString() || item.userId?.id?.toString() || item.userId?.toString();
@@ -2168,29 +2249,12 @@ exports.getWalletReport = async (req, res) => {
               }
             }
           } else {
-            // For "all users" view OR account filter view:
-            // - If accountId is set: Wallet transactions are in combined array and should be counted here
-            //   (they were filtered by accountId, so they're not in initial walletTransactions array)
-            // - If no accountId: Wallet transactions are already counted in initial values
-            //   (from walletTransactions array before the combined loop)
-            if (accountId) {
-              // Account filter view: Count wallet transactions from combined array
-              // These are filtered by accountId and are in the combined array
-              if (walletTransactionType === 'add' || (walletTransactionType === 'transaction' && item.operation === 'add')) {
-                cashIn += amount;
-                walletTxnCashIn += amount;
-              } else if (walletTransactionType === 'withdraw' || (walletTransactionType === 'transaction' && item.operation === 'subtract')) {
-                cashOut += amount;
-                walletTxnCashOut += amount;
-              }
-            } else {
-              // All users view (no accountId): Wallet transactions already counted in initial values
-              // Just track them in the breakdown for debugging
-              if (walletTransactionType === 'add' || (walletTransactionType === 'transaction' && item.operation === 'add')) {
-                walletTxnCashIn += amount;
-              } else if (walletTransactionType === 'withdraw' || (walletTransactionType === 'transaction' && item.operation === 'subtract')) {
-                walletTxnCashOut += amount;
-              }
+            // All users view (no accountId, no user filters): Wallet transactions already counted in initial values
+            // Just track them in the breakdown for debugging
+            if (walletTransactionType === 'add' || (walletTransactionType === 'transaction' && item.operation === 'add')) {
+              walletTxnCashIn += amount;
+            } else if (walletTransactionType === 'withdraw' || (walletTransactionType === 'transaction' && item.operation === 'subtract')) {
+              walletTxnCashOut += amount;
             }
           }
         }
@@ -2353,6 +2417,12 @@ exports.getWalletReport = async (req, res) => {
       console.log(`[Account Filter] Wallet transactions found: ${walletTransactions?.length || 0}`);
       console.log(`[Account Filter] Filtered collections: ${transformedCollections.length}`);
       console.log(`[Account Filter] Filtered wallet transactions: ${transformedWalletTransactions.length}`);
+      
+      // Log withdraw transactions count for Payment Mode display
+      const withdrawTransactions = transformedWalletTransactions.filter(wt => 
+        wt.type === 'Withdraw' || wt.walletTransactionType === 'withdraw'
+      );
+      console.log(`[Account Filter] Withdraw transactions: ${withdrawTransactions.length} (will be displayed by default)`);
       console.log(`[Account Filter] Summary - CashIn: ${cashIn}, CashOut: ${cashOut}, Balance: ${cashIn - cashOut}`);
     }
 
@@ -3884,9 +3954,10 @@ exports.withdrawFromAccount = async (req, res) => {
     // Fetch payment mode to get the correct mode (Cash, UPI, or Bank)
     const PaymentMode = require('../models/paymentModeModel');
     let mode = 'Cash'; // Default to Cash
+    let paymentMode = null;
     
     try {
-      const paymentMode = await PaymentMode.findById(accountId);
+      paymentMode = await PaymentMode.findById(accountId);
       if (paymentMode) {
         // Use the extractModeFromPaymentMode helper function
         mode = extractModeFromPaymentMode(paymentMode);
@@ -3896,6 +3967,34 @@ exports.withdrawFromAccount = async (req, res) => {
       // Continue with default Cash mode
     }
     const wallet = await updateWalletBalance(targetUserId, mode, amount, 'subtract', 'withdraw');
+    
+    // Update Payment Mode wallet (if payment mode is active and has appropriate display settings)
+    let paymentModeWallet = null;
+    if (paymentMode && paymentMode.isActive) {
+      // Check if Payment Mode has Expenses or Transaction in display (withdrawals are money going out)
+      const hasExpensesDisplay = paymentMode.display && paymentMode.display.includes('Expenses');
+      const hasTransactionDisplay = paymentMode.display && paymentMode.display.includes('Transaction');
+      
+      if (hasExpensesDisplay || hasTransactionDisplay) {
+        const { updatePaymentModeWalletBalance } = require('../utils/walletHelper');
+        console.log(`\n   [Withdraw From Account] Updating Payment Mode wallet (${paymentMode.modeName})...`);
+        try {
+          paymentModeWallet = await updatePaymentModeWalletBalance(
+            accountId,
+            mode,
+            amount,
+            'subtract',
+            'withdraw'
+          );
+          console.log(`   ✅ Payment Mode Wallet Updated - CashIn: ₹${paymentModeWallet.cashIn}, CashOut: ₹${paymentModeWallet.cashOut}, Balance: ₹${paymentModeWallet.totalBalance} (-₹${amount})`);
+        } catch (error) {
+          console.error(`   ❌ Error updating Payment Mode wallet: ${error.message}`);
+          // Don't fail the withdrawal if Payment Mode wallet update fails
+        }
+      } else {
+        console.log(`   ⚠️  Payment Mode (${paymentMode.modeName}) does not have Expenses or Transaction in display - skipping Payment Mode wallet update`);
+      }
+    }
     
     // Get user info for notification
     const targetUser = await User.findById(targetUserId);

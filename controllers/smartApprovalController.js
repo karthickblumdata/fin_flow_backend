@@ -29,7 +29,7 @@ const transformCollection = (collection) => {
     formattedAmount: formatCurrency(collection.amount || 0),
     date: collection.createdAt,
     status: collection.status || 'Pending',
-    mode: collection.mode || 'Cash',
+    mode: paymentMode.modeName || collection.mode || 'Cash',
     isSystematicEntry: isSystematicEntry,
     collectionType: collection.collectionType || (isSystematicEntry ? 'systematic' : 'collection'),
     isAutoPay: isAutoPay,
@@ -72,6 +72,7 @@ const transformCollection = (collection) => {
 const transformTransaction = (transaction) => {
   const sender = transaction.sender || {};
   const receiver = transaction.receiver || {};
+  const paymentMode = transaction.paymentModeId || {};
   const senderName = sender.name || 'Unknown';
   const receiverName = receiver.name || 'Unknown';
   const isSystematicEntry = transaction.isSystemTransaction === true || transaction.isAutoPay === true;
@@ -87,7 +88,7 @@ const transformTransaction = (transaction) => {
     formattedAmount: formatCurrency(transaction.amount || 0),
     date: transaction.createdAt,
     status: transaction.status || 'Pending',
-    mode: transaction.mode || 'Cash',
+    mode: paymentMode.modeName || transaction.mode || 'Cash',
     isSystematicEntry: isSystematicEntry,
     isAutoPay: isAutoPay,
     flagged: isFlagged,
@@ -125,6 +126,7 @@ const transformTransaction = (transaction) => {
 // Transform Expense to Smart Approval Item
 const transformExpense = (expense) => {
   const user = expense.userId || expense.createdBy || {};
+  const paymentMode = expense.paymentModeId || {};
   const isFlagged = expense.status === 'Flagged';
 
   return {
@@ -136,7 +138,7 @@ const transformExpense = (expense) => {
     formattedAmount: formatCurrency(expense.amount || 0),
     date: expense.createdAt,
     status: expense.status || 'Pending',
-    mode: expense.mode || 'Cash',
+    mode: paymentMode.modeName || expense.mode || 'Cash',
     isSystematicEntry: false, // Expenses don't have auto pay
     isAutoPay: false,
     flagged: isFlagged,
@@ -485,6 +487,7 @@ exports.getSmartApprovals = async (req, res) => {
           .populate('initiatedBy', 'name email role')
           .populate('receiver', 'name email role')
           .populate('sender', 'name email role')
+          .populate('paymentModeId', 'modeName autoPay assignedReceiver description isActive')
           .populate('approvedBy', 'name email role')
           .sort({ createdAt: -1 })
           .lean()
@@ -497,6 +500,7 @@ exports.getSmartApprovals = async (req, res) => {
         Expense.find(expenseFilter)
           .populate('createdBy', 'name email role')
           .populate('userId', 'name email role')
+          .populate('paymentModeId', 'modeName autoPay assignedReceiver description isActive')
           .populate('approvedBy', 'name email role')
           .sort({ createdAt: -1 })
           .lean()
