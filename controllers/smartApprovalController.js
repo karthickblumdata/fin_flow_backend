@@ -126,7 +126,18 @@ const transformTransaction = (transaction) => {
 // Transform Expense to Smart Approval Item
 const transformExpense = (expense) => {
   const user = expense.userId || expense.createdBy || {};
-  const paymentMode = expense.paymentModeId || {};
+  // Handle paymentModeId - it can be populated (object) or just an ID (string/ObjectId)
+  let paymentMode = {};
+  if (expense.paymentModeId) {
+    // If populated, it will be an object with modeName
+    if (typeof expense.paymentModeId === 'object' && expense.paymentModeId.modeName) {
+      paymentMode = expense.paymentModeId;
+    } else {
+      // If not populated, it's just an ID - we can't get modeName without another query
+      // So we'll fall back to expense.mode
+      paymentMode = {};
+    }
+  }
   const isFlagged = expense.status === 'Flagged';
 
   return {

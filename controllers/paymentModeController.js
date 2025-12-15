@@ -269,12 +269,13 @@ exports.updatePaymentMode = async (req, res) => {
     }
 
     const previousValue = paymentMode.toObject();
-    const { description, autoPay, assignedReceiver, isActive, display } = req.body;
+    const { modeName, description, autoPay, assignedReceiver, isActive, display } = req.body;
     
     console.log(`[Update Payment Mode] User: ${userName} (ID: ${userId})`);
     console.log(`   Payment Mode: ${paymentMode.modeName} (ID: ${paymentMode._id})`);
     console.log(`   Previous Display: ${JSON.stringify(paymentMode.display || [])}`);
 
+    if (modeName !== undefined) paymentMode.modeName = modeName;
     if (description !== undefined) paymentMode.description = description;
     if (autoPay !== undefined) paymentMode.autoPay = autoPay;
     if (assignedReceiver !== undefined) paymentMode.assignedReceiver = assignedReceiver;

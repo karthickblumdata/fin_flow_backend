@@ -340,6 +340,7 @@ exports.getTransactions = async (req, res) => {
       .populate('receiver', 'name email role')
       .populate('initiatedBy', 'name email role')
       .populate('approvedBy', 'name email role')
+      .populate('paymentModeId', 'modeName description')
       .sort({ createdAt: -1 });
 
     res.status(200).json({

@@ -1024,25 +1024,35 @@ exports.getDashboardSummary = async (req, res) => {
     });
 
     // Collections Status Counts
-    // CRITICAL: Exclude Entry 1 collections to prevent double counting
+    // CRITICAL: Count only Entry 1 collections to prevent double counting
     // Entry 1: isSystemCollection = false AND no parentCollectionId
     // Entry 2: isSystemCollection = true AND has parentCollectionId
-    // Only Entry 2 should be counted because that's where wallet update happens
+    // Only Entry 1 should be counted (user-created original collections)
     // Build filter properly to handle baseCollectionFilter's $or if it exists
     const collectionFilterForStatusCounts = {
       $and: [
         baseCollectionFilter,
         {
-          // Exclude Entry 1: Only count Entry 2 (system collections with parentCollectionId)
-          // Entry 2 satisfies: isSystemCollection = true OR parentCollectionId exists
-          $or: [
-            { isSystemCollection: true }, // Entry 2: system collection
-            { parentCollectionId: { $exists: true, $ne: null } } // Entry 2: has parentCollectionId
+          // Count only Entry 1: Exclude Entry 2 (system collections with parentCollectionId)
+          // Entry 1 satisfies: isSystemCollection is NOT true AND parentCollectionId doesn't exist or is null
+          $and: [
+            {
+              $or: [
+                { isSystemCollection: false },
+                { isSystemCollection: { $exists: false } }
+              ]
+            },
+            {
+              $or: [
+                { parentCollectionId: { $exists: false } },
+                { parentCollectionId: null }
+              ]
+            }
           ]
         }
       ]
     };
-    console.log(`[Dashboard Summary] Querying collections with filter (excluding Entry 1):`, JSON.stringify(collectionFilterForStatusCounts, null, 2));
+    console.log(`[Dashboard Summary] Querying collections with filter (counting Entry 1 only):`, JSON.stringify(collectionFilterForStatusCounts, null, 2));
     const collectionStatusCounts = await Collection.aggregate([
       {
         $match: collectionFilterForStatusCounts

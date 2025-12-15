@@ -11,6 +11,7 @@ const Expense = require('../models/expenseModel');
 
 const STATUS_ALIASES = {
   approved: 'approved',
+  approve: 'approved', // Handle "Approve" status (without 'd')
   'approved✅': 'approved',
   completed: 'approved',
   complete: 'approved',
@@ -766,8 +767,14 @@ exports.getWalletReport = async (req, res) => {
       mode,
       status,
       type,
-      accountId
+      accountId: accountIdRaw
     } = req.query;
+    
+    // Handle accountId: normalize 'null' string to null, and empty string to null
+    let accountId = accountIdRaw;
+    if (accountIdRaw === 'null' || accountIdRaw === null || accountIdRaw === undefined || accountIdRaw === '') {
+      accountId = null;
+    }
 
     // ============================================================================
     // MULTIPLE USER SELECTION SUPPORT
@@ -1454,6 +1461,51 @@ exports.getWalletReport = async (req, res) => {
         : []
     ]);
 
+    // Fix: For system collections, ensure collectedBy is explicitly null (not undefined)
+    // This ensures frontend can correctly detect system collections
+    if (includeCollections && collections) {
+      collections.forEach(collection => {
+        if (collection.isSystemCollection && collection.collectedBy === undefined) {
+          collection.collectedBy = null;
+        }
+      });
+    }
+
+    // Fix: For system collections with null 'from', get from parent collection and populate
+    // This ensures 'from' field (collector name) is available for system collections
+    if (includeCollections && collections) {
+      const collectionsToFix = collections.filter(c => c.isSystemCollection && !c.from && c.parentCollectionId);
+      if (collectionsToFix.length > 0) {
+        const Collection = require('../models/collectionModel');
+        const parentIds = collectionsToFix.map(c => c.parentCollectionId._id || c.parentCollectionId);
+        const parentCollections = await Collection.find({ _id: { $in: parentIds } })
+          .populate('collectedBy', 'name email role')
+          .populate('from', 'name email role')
+          .lean();
+        
+        const parentMap = new Map();
+        parentCollections.forEach(p => parentMap.set(p._id.toString(), p));
+        
+        for (let collection of collectionsToFix) {
+          const parentId = (collection.parentCollectionId._id || collection.parentCollectionId).toString();
+          const parent = parentMap.get(parentId);
+          if (parent) {
+            const collectorId = parent.from || parent.collectedBy;
+            if (collectorId) {
+              // Set from field to collector ID (ObjectId or populated object)
+              collection.from = collectorId;
+              // Populate the from field
+              const User = require('../models/userModel');
+              const fromUser = await User.findById(collectorId._id || collectorId).select('name email role').lean();
+              if (fromUser) {
+                collection.from = fromUser;
+              }
+            }
+          }
+        }
+      }
+    }
+
     console.log('═══════════════════════════════════════════════════════════');
     console.log('📦 [WALLET REPORT] DATABASE QUERY RESULTS:');
     console.log('   Expenses:', expenses.length, 'records');
@@ -1465,6 +1517,27 @@ exports.getWalletReport = async (req, res) => {
     console.log('   Wallet Transactions:', walletTransactions?.length || 0, 'records');
     if (accountId) {
       console.log('     → Filtered by accountId in notes:', accountId);
+    }
+    // Debug: Check paymentModeId population for Expenses
+    if (expenses && expenses.length > 0) {
+      console.log('   🔍 [WALLET REPORT] Checking paymentModeId population for Expenses:');
+      expenses.slice(0, 3).forEach((exp, idx) => {
+        console.log(`     Expense ${idx + 1} (ID: ${exp._id}):`);
+        console.log(`       mode: ${exp.mode}`);
+        console.log(`       paymentModeId (raw): ${exp.paymentModeId}`);
+        console.log(`       paymentModeId type: ${typeof exp.paymentModeId}`);
+        if (exp.paymentModeId) {
+          if (typeof exp.paymentModeId === 'object' && exp.paymentModeId.modeName) {
+            console.log(`       ✅ paymentMode populated - modeName: ${exp.paymentModeId.modeName}`);
+          } else if (typeof exp.paymentModeId === 'object') {
+            console.log(`       ⚠️  paymentMode is object but modeName missing:`, exp.paymentModeId);
+          } else {
+            console.log(`       ⚠️  paymentModeId is not populated (ObjectId string): ${exp.paymentModeId}`);
+          }
+        } else {
+          console.log(`       ⚠️  paymentModeId is null or undefined`);
+        }
+      });
     }
     // Debug: Check paymentModeId population for Transactions
     if (transactions && transactions.length > 0) {
@@ -1505,13 +1578,65 @@ exports.getWalletReport = async (req, res) => {
 
     // Transform expenses with paymentMode fallback
     const transformedExpenses = await Promise.all(expenses.map(async (exp) => {
-      // Get paymentMode with fallback (will fetch from DB if populate failed)
-      const paymentMode = await getPaymentModeObject(exp.paymentModeId);
-      
       // Get paymentModeId value (could be ObjectId string or object)
       const paymentModeIdValue = exp.paymentModeId 
         ? (exp.paymentModeId._id || exp.paymentModeId.toString() || exp.paymentModeId)
         : null;
+      
+      // Priority 1: Use populated paymentModeId directly if available (like Self Wallet)
+      // Priority 2: Fallback to getPaymentModeObject if populate failed
+      // Priority 3: If paymentModeId is null, try to find matching payment mode based on mode field
+      let paymentMode = null;
+      if (exp.paymentModeId && typeof exp.paymentModeId === 'object' && exp.paymentModeId.modeName) {
+        // Populated paymentModeId - use directly
+        paymentMode = {
+          _id: exp.paymentModeId._id || paymentModeIdValue,
+          id: exp.paymentModeId._id || paymentModeIdValue,
+          modeName: exp.paymentModeId.modeName,
+          description: exp.paymentModeId.description || null
+        };
+      } else if (paymentModeIdValue) {
+        // Populate failed - fetch from DB using paymentModeId
+        paymentMode = await getPaymentModeObject(paymentModeIdValue);
+      }
+      
+      // Priority 3: If paymentMode is still null and we have a mode, try to find matching payment mode
+      if (!paymentMode && exp.mode) {
+        try {
+          const PaymentMode = require('../models/paymentModeModel');
+          // Try to find first active Payment Mode that matches the expense mode (Cash/UPI/Bank)
+          const matchingPaymentMode = await PaymentMode.findOne({
+            isActive: true,
+            description: { $regex: new RegExp(`mode:${exp.mode}`, 'i') }
+          }).sort({ createdAt: 1 });
+          
+          if (matchingPaymentMode) {
+            paymentMode = {
+              _id: matchingPaymentMode._id,
+              id: matchingPaymentMode._id,
+              modeName: matchingPaymentMode.modeName,
+              description: matchingPaymentMode.description || null
+            };
+            console.log(`[WALLET REPORT] Found matching payment mode for expense ${exp._id}: ${matchingPaymentMode.modeName} (based on mode: ${exp.mode})`);
+          }
+        } catch (error) {
+          console.error(`[WALLET REPORT] Error finding matching payment mode for expense ${exp._id}:`, error.message);
+        }
+      }
+      
+      // Priority 4: Final fallback - if paymentMode is still null, create a basic paymentMode object based on mode
+      // This ensures frontend always has a paymentMode object with modeName
+      if (!paymentMode) {
+        // Use mode field (Cash/UPI/Bank) as modeName if no payment mode found
+        const fallbackModeName = exp.mode || 'Cash';
+        paymentMode = {
+          _id: paymentModeIdValue || null,
+          id: paymentModeIdValue || null,
+          modeName: fallbackModeName,
+          description: null
+        };
+        console.log(`[WALLET REPORT] Using fallback payment mode for expense ${exp._id}: ${fallbackModeName} (paymentModeId: ${paymentModeIdValue || 'null'})`);
+      }
       
       return {
         id: exp._id,
@@ -1552,13 +1677,26 @@ exports.getWalletReport = async (req, res) => {
 
     // Transform transactions with paymentMode fallback
     const transformedTransactions = await Promise.all(transactions.map(async (tx) => {
-      // Get paymentMode with fallback (will fetch from DB if populate failed)
-      const paymentMode = await getPaymentModeObject(tx.paymentModeId);
-      
       // Get paymentModeId value (could be ObjectId string or object)
       const paymentModeIdValue = tx.paymentModeId 
         ? (tx.paymentModeId._id || tx.paymentModeId.toString() || tx.paymentModeId)
         : null;
+      
+      // Priority 1: Use populated paymentModeId directly if available (like Self Wallet)
+      // Priority 2: Fallback to getPaymentModeObject if populate failed
+      let paymentMode = null;
+      if (tx.paymentModeId && typeof tx.paymentModeId === 'object' && tx.paymentModeId.modeName) {
+        // Populated paymentModeId - use directly
+        paymentMode = {
+          _id: tx.paymentModeId._id || paymentModeIdValue,
+          id: tx.paymentModeId._id || paymentModeIdValue,
+          modeName: tx.paymentModeId.modeName,
+          description: tx.paymentModeId.description || null
+        };
+      } else {
+        // Populate failed - fetch from DB
+        paymentMode = await getPaymentModeObject(tx.paymentModeId);
+      }
       
       return {
         id: tx._id,
@@ -1692,6 +1830,43 @@ exports.getWalletReport = async (req, res) => {
           includedCollectionsCount++;
         }
         
+        // Handle 'from' field - ensure it's populated (not ObjectId)
+        // For system collections, 'from' should be the collector's name
+        let fromUser = null;
+        if (col.from) {
+          if (typeof col.from === 'object' && col.from.name) {
+            // Already populated - use directly
+            fromUser = {
+              id: col.from._id,
+              name: col.from.name,
+              email: col.from.email,
+              role: col.from.role
+            };
+          } else {
+            // ObjectId (not populated) - fetch user
+            const User = require('../models/userModel');
+            const fromUserId = col.from._id || col.from.toString();
+            const fromUserDoc = await User.findById(fromUserId).select('name email role').lean();
+            if (fromUserDoc) {
+              fromUser = {
+                id: fromUserDoc._id,
+                name: fromUserDoc.name,
+                email: fromUserDoc.email,
+                role: fromUserDoc.role
+              };
+            }
+          }
+        }
+        // Fallback to collectedBy if from is not available
+        if (!fromUser && col.collectedBy && col.collectedBy.name) {
+          fromUser = {
+            id: col.collectedBy._id,
+            name: col.collectedBy.name,
+            email: col.collectedBy.email,
+            role: col.collectedBy.role
+          };
+        }
+        
         return {
           id: col._id,
           type: 'Collections',
@@ -1715,17 +1890,6 @@ exports.getWalletReport = async (req, res) => {
             email: col.approvedBy.email,
             role: col.approvedBy.role
           } : null,
-          from: col.from ? {
-            id: col.from._id,
-            name: col.from.name,
-            email: col.from.email,
-            role: col.from.role
-          } : (col.collectedBy ? {
-            id: col.collectedBy._id,
-            name: col.collectedBy.name,
-            email: col.collectedBy.email,
-            role: col.collectedBy.role
-          } : null),
           createdBy: (col.isSystemCollection || col.isSystematicEntry || !col.collectedBy) ? {
             id: null,
             name: 'System',
@@ -1737,11 +1901,25 @@ exports.getWalletReport = async (req, res) => {
             email: col.collectedBy.email,
             role: col.collectedBy.role
           } : null),
-          paymentMode: await getPaymentModeObject(col.paymentModeId, true), // Include autoPay for collections
+          // Get paymentModeId value (could be ObjectId string or object)
+          paymentModeId: col.paymentModeId 
+            ? (col.paymentModeId._id || col.paymentModeId.toString() || col.paymentModeId)
+            : null,
+          // Priority 1: Use populated paymentModeId directly if available (like Self Wallet)
+          // Priority 2: Fallback to getPaymentModeObject if populate failed
+          paymentMode: (col.paymentModeId && typeof col.paymentModeId === 'object' && col.paymentModeId.modeName)
+            ? {
+                _id: col.paymentModeId._id || (col.paymentModeId.toString ? col.paymentModeId.toString() : col.paymentModeId),
+                id: col.paymentModeId._id || (col.paymentModeId.toString ? col.paymentModeId.toString() : col.paymentModeId),
+                modeName: col.paymentModeId.modeName,
+                description: col.paymentModeId.description || null,
+                autoPay: col.paymentModeId.autoPay || false
+              }
+            : await getPaymentModeObject(col.paymentModeId, true), // Include autoPay for collections
           voucherNumber: col.voucherNumber,
           customerName: col.customerName,
-          from: col.from ? col.from.name : (col.collectedBy ? col.collectedBy.name : 'Unknown'),
-          to: col.assignedReceiver ? col.assignedReceiver.name : 'Unknown',
+          from: fromUser ? fromUser.name : (col.collectedBy && col.collectedBy.name ? col.collectedBy.name : 'Unknown'),
+          to: (col.assignedReceiver && col.assignedReceiver.name) ? col.assignedReceiver.name : 'Unknown',
           amount: col.amount,
           mode: col.mode,
           status: col.status,
@@ -1789,18 +1967,62 @@ exports.getWalletReport = async (req, res) => {
           const accountMatch = wt.notes.match(/account\s+([^\s]+)/i);
           if (accountMatch) {
             extractedAccountId = accountMatch[1];
-            // Try to get account name from payment mode if available
+            // Try to get account name from payment mode
+            // Priority 1: Use selectedPaymentMode if it matches
             if (selectedPaymentMode && extractedAccountId === accountId) {
               accountName = selectedPaymentMode.modeName || selectedPaymentMode.description || extractedAccountId;
             } else {
-              accountName = extractedAccountId;
+              // Priority 2: Fetch payment mode using extractedAccountId to get account name
+              try {
+                const accountPaymentMode = await getPaymentModeObject(extractedAccountId);
+                if (accountPaymentMode && accountPaymentMode.modeName) {
+                  accountName = accountPaymentMode.modeName;
+                } else {
+                  // Priority 3: Use paymentMode from wt.paymentModeId if available
+                  const wtPaymentMode = await getPaymentModeObject(wt.paymentModeId);
+                  if (wtPaymentMode && wtPaymentMode.modeName) {
+                    accountName = wtPaymentMode.modeName;
+                  } else {
+                    // Fallback: Use extractedAccountId (Object ID) only if payment mode not found
+                    accountName = extractedAccountId;
+                  }
+                }
+              } catch (error) {
+                // If fetching fails, try using wt.paymentModeId
+                try {
+                  const wtPaymentMode = await getPaymentModeObject(wt.paymentModeId);
+                  if (wtPaymentMode && wtPaymentMode.modeName) {
+                    accountName = wtPaymentMode.modeName;
+                  } else {
+                    accountName = extractedAccountId;
+                  }
+                } catch (err) {
+                  // Last fallback: Use extractedAccountId
+                  accountName = extractedAccountId;
+                }
+              }
             }
           }
         }
         
-        // If no accountId in notes, use userId name as account identifier
-        if (!extractedAccountId && wt.userId) {
-          accountName = wt.userId.name || 'User Account';
+        // If no accountId in notes, try to get account name from paymentModeId
+        if (!extractedAccountId) {
+          if (wt.paymentModeId) {
+            try {
+              const wtPaymentMode = await getPaymentModeObject(wt.paymentModeId);
+              if (wtPaymentMode && wtPaymentMode.modeName) {
+                accountName = wtPaymentMode.modeName;
+              } else if (wt.userId) {
+                accountName = wt.userId.name || 'User Account';
+              }
+            } catch (error) {
+              if (wt.userId) {
+                accountName = wt.userId.name || 'User Account';
+              }
+            }
+          } else if (wt.userId) {
+            accountName = wt.userId.name || 'User Account';
+          }
         }
         
         // Determine transaction type display
@@ -1862,7 +2084,16 @@ exports.getWalletReport = async (req, res) => {
           amount: wt.amount,
           mode: wt.mode,
           paymentModeId: wt.paymentModeId ? (wt.paymentModeId._id || wt.paymentModeId.toString() || wt.paymentModeId) : null,
-          paymentMode: await getPaymentModeObject(wt.paymentModeId),
+          // Priority 1: Use populated paymentModeId directly if available (like Self Wallet)
+          // Priority 2: Fallback to getPaymentModeObject if populate failed
+          paymentMode: (wt.paymentModeId && typeof wt.paymentModeId === 'object' && wt.paymentModeId.modeName)
+            ? {
+                _id: wt.paymentModeId._id || (wt.paymentModeId.toString ? wt.paymentModeId.toString() : wt.paymentModeId),
+                id: wt.paymentModeId._id || (wt.paymentModeId.toString ? wt.paymentModeId.toString() : wt.paymentModeId),
+                modeName: wt.paymentModeId.modeName,
+                description: wt.paymentModeId.description || null
+              }
+            : await getPaymentModeObject(wt.paymentModeId),
           status: 'Completed', // WalletTransactions are always completed when in report
           accountId: extractedAccountId,
           accountName: accountName,
@@ -1942,7 +2173,15 @@ exports.getWalletReport = async (req, res) => {
       ...transformedCollections,
       ...transformedWalletTransactions // Includes withdraw transactions by default
     ].sort((a, b) => {
-      // Sort by date (newest first) - withdraw transactions will appear in chronological order
+      // Priority 1: System entries first (Entry 2 - isSystemCollection: true OR createdBy: System)
+      const aIsSystem = a.isSystemCollection === true || a.createdBy?.name === 'System' || a.isSystematicEntry === true;
+      const bIsSystem = b.isSystemCollection === true || b.createdBy?.name === 'System' || b.isSystematicEntry === true;
+      
+      // If one is System and other is not, System comes first
+      if (aIsSystem && !bIsSystem) return -1;
+      if (!aIsSystem && bIsSystem) return 1;
+      
+      // Priority 2: Sort by date (newest first) - withdraw transactions will appear in chronological order
       const first = new Date(a.date || a.createdAt || 0).getTime();
       const second = new Date(b.date || b.createdAt || 0).getTime();
       return second - first;
@@ -2428,18 +2667,30 @@ exports.getWalletReport = async (req, res) => {
 
     // Calculate balance from cash flow
     // Priority order:
-    // 1. Account Reports (accountId provided): Use calculated balance (cashIn - cashOut)
+    // 1. Account Reports (accountId provided OR accountId is null in Account Reports context): Use calculated balance (cashIn - cashOut)
     // 2. Multiple users (targetUserIds with length > 1): Use sum of all selected users' wallet.totalBalance
     // 3. Self wallet (targetUserId provided): Use wallet.totalBalance
     // 4. Role filter (roleFilteredUserIds): Use walletSummary.totalBalance (sum of wallets for users with this role)
-    // 5. All users view (no targetUserId, no targetUserIds, no roleFilter): Use walletSummary.totalBalance (sum of all wallets)
+    // 5. All users view (no targetUserId, no targetUserIds, no roleFilter, no accountId): Use walletSummary.totalBalance (sum of all wallets)
+    // NOTE: For Account Reports "All Accounts" (accountId is null), we still use calculated balance (cashIn - cashOut)
+    // because Account Reports should show cash flow balance, not sum of wallet balances
     let finalBalance;
     
+    // Check if this is Account Reports context (accountId was provided in query, even if null)
+    // Account Reports "All Accounts" should use calculated balance, not wallet balance sum
+    const isAccountReportsContext = req.query.accountId !== undefined; // accountId parameter exists (even if null)
+    
     if (accountId) {
-      // Account Reports: Always use calculated balance (cashIn - cashOut)
+      // Account Reports with specific account: Always use calculated balance (cashIn - cashOut)
       // This ensures balance reflects only the selected account's transactions
       finalBalance = cashIn - cashOut;
-      console.log('📊 Account Report - Using calculated balance from account transactions:', finalBalance);
+      console.log('📊 Account Report (specific account) - Using calculated balance from account transactions:', finalBalance);
+    } else if (isAccountReportsContext) {
+      // Account Reports "All Accounts" (accountId is null but was provided in query): Use calculated balance
+      // This ensures balance reflects cash flow (cashIn - cashOut) for all accounts combined
+      finalBalance = cashIn - cashOut;
+      console.log('📊 Account Report (All Accounts) - Using calculated balance from cash flow:', finalBalance);
+      console.log('   Cash In:', cashIn, ', Cash Out:', cashOut, ', Balance:', finalBalance);
     } else if (targetUserIds && targetUserIds.length > 1) {
       // Multiple users selected: Use sum of all selected users' wallet balances
       // This gives us the combined balance of all selected users' self wallets
@@ -2886,6 +3137,7 @@ exports.getSelfWalletReport = async (req, res) => {
           .populate('collectedBy', 'name email')
           .populate('assignedReceiver', 'name email')
           .populate('approvedBy', 'name email')
+          .populate('from', 'name email')
           .populate('paymentModeId', 'modeName description autoPay assignedReceiver')
           .sort({ createdAt: -1 })
           .lean()
@@ -2924,6 +3176,50 @@ exports.getSelfWalletReport = async (req, res) => {
     );
 
     const [expenses, transactions, collections, walletTransactions, wallet] = await Promise.all(promises);
+
+    // Fix: For system collections with null 'from', get from parent collection and populate
+    // This ensures 'from' field (collector name) is available for system collections
+    if (includeCollections && collections) {
+      // Ensure collectedBy is explicitly null for system collections
+      // This is crucial because .populate() might return undefined for null fields,
+      // which the frontend might not correctly interpret as null.
+      collections.forEach(col => {
+        if (col.isSystemCollection) {
+          col.collectedBy = null;
+        }
+      });
+      
+      const collectionsToFix = collections.filter(c => c.isSystemCollection && !c.from && c.parentCollectionId);
+      if (collectionsToFix.length > 0) {
+        const Collection = require('../models/collectionModel');
+        const parentIds = collectionsToFix.map(c => c.parentCollectionId._id || c.parentCollectionId);
+        const parentCollections = await Collection.find({ _id: { $in: parentIds } })
+          .populate('collectedBy', 'name email role')
+          .populate('from', 'name email role')
+          .lean();
+        
+        const parentMap = new Map();
+        parentCollections.forEach(p => parentMap.set(p._id.toString(), p));
+        
+        for (let collection of collectionsToFix) {
+          const parentId = (collection.parentCollectionId._id || collection.parentCollectionId).toString();
+          const parent = parentMap.get(parentId);
+          if (parent) {
+            const collectorId = parent.from || parent.collectedBy;
+            if (collectorId) {
+              // Set from field to collector ID (ObjectId or populated object)
+              collection.from = collectorId;
+              // Populate the from field
+              const User = require('../models/userModel');
+              const fromUser = await User.findById(collectorId._id || collectorId).select('name email role').lean();
+              if (fromUser) {
+                collection.from = fromUser;
+              }
+            }
+          }
+        }
+      }
+    }
 
     // ============================================================================
     // CRITICAL: For Self Wallet Summary Totals, calculate from ALL data (no filters)
@@ -3024,15 +3320,64 @@ exports.getSelfWalletReport = async (req, res) => {
         
         console.log(`     - isCollector: ${isCollector}, isAssignedReceiver: ${isAssignedReceiver}`);
         
-        // Handle Entry 1 (Pending collections) - Collector gets cashIn (wallet updated on creation)
+        // Handle Entry 1 (Pending collections) - Collector gets cashIn ONLY if AutoPay was enabled
+        // CRITICAL: When AutoPay is disabled, wallet is NOT updated at creation, so don't count Pending collections
+        // CRITICAL: When Entry 1 is Approved, wallet is updated via Entry 2, so don't count Entry 1 (Approved) - only count Entry 2
         if (isEntry1) {
-          if (isCollector && (c.status === 'Pending' || c.status === 'Approved' || c.status === 'Verified')) {
-            // Entry 1: Collector gets cashIn when collection is created (Pending status)
-            // Wallet is updated on creation, so count it for collector
-            totalCashIn += toSafeNumber(c.amount);
-            console.log(`   ✅ ADDED Entry 1 collection cashIn (collector, status: ${c.status}): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
+          // Check if AutoPay was enabled (wallet updated at creation)
+          // AutoPay now works with ALL modes including Cash (default mode)
+          // Check if assignedReceiver exists (handle both ObjectId and populated object)
+          const assignedReceiverValue = paymentMode?.assignedReceiver;
+          let hasAssignedReceiver = false;
+          if (assignedReceiverValue) {
+            if (typeof assignedReceiverValue === 'object' && assignedReceiverValue._id) {
+              // Populated object with _id
+              hasAssignedReceiver = assignedReceiverValue._id.toString() !== '' && assignedReceiverValue._id.toString() !== 'null';
+            } else if (typeof assignedReceiverValue === 'object' && assignedReceiverValue.toString) {
+              // ObjectId (not populated)
+              const receiverIdStr = assignedReceiverValue.toString();
+              hasAssignedReceiver = receiverIdStr !== '' && receiverIdStr !== 'null' && receiverIdStr.length > 0;
+            } else if (typeof assignedReceiverValue === 'string') {
+              // String ID
+              hasAssignedReceiver = assignedReceiverValue !== '' && assignedReceiverValue !== 'null';
+            } else {
+              // Other cases - check if truthy
+              hasAssignedReceiver = !!assignedReceiverValue;
+            }
+          }
+          const autoPayWasEnabled = isAutoPayEnabled && hasAssignedReceiver;
+          
+          // Enhanced debug logging
+          console.log(`     - assignedReceiverValue: ${assignedReceiverValue} (type: ${typeof assignedReceiverValue})`);
+          console.log(`     - hasAssignedReceiver: ${hasAssignedReceiver}`);
+          console.log(`     - autoPayWasEnabled: ${autoPayWasEnabled}`);
+          
+          if (isCollector) {
+            if (c.status === 'Pending') {
+              // Pending status: Only count if AutoPay was enabled (wallet updated at creation)
+              if (autoPayWasEnabled) {
+                totalCashIn += toSafeNumber(c.amount);
+                console.log(`   ✅ ADDED Entry 1 collection cashIn (collector, Pending, AutoPay enabled): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
+              } else {
+                console.log(`   ⏭️  SKIPPING Entry 1 Pending (AutoPay disabled, wallet NOT updated at creation): ${voucherNum}`);
+              }
+            } else if (c.status === 'Approved' || c.status === 'Verified') {
+              // Approved/Verified status: 
+              // - If AutoPay was enabled: Count Entry 1 (collector's cashIn from creation is still in wallet)
+              // - If AutoPay was disabled: DO NOT count Entry 1 (wallet updated via Entry 2, so Entry 2 will be counted)
+              if (autoPayWasEnabled) {
+                // AutoPay enabled: Collector's cashIn from creation is still in wallet, count it
+                totalCashIn += toSafeNumber(c.amount);
+                console.log(`   ✅ ADDED Entry 1 collection cashIn (collector, ${c.status}, AutoPay enabled - cashIn from creation still in wallet): ${voucherNum} - Amount: ₹${c.amount}, Total now: ₹${totalCashIn}`);
+              } else {
+                // AutoPay disabled: Wallet updated via Entry 2, Entry 2 will be counted instead
+                console.log(`   ⏭️  SKIPPING Entry 1 ${c.status} (AutoPay disabled, wallet updated via Entry 2, Entry 2 will be counted instead): ${voucherNum}`);
+              }
+            } else {
+              console.log(`   ⏭️  SKIPPING Entry 1 (wrong status): ${voucherNum} - Status: ${c.status}`);
+            }
           } else {
-            console.log(`   ⏭️  SKIPPING Entry 1 (not collector or wrong status): ${voucherNum} - Status: ${c.status}`);
+            console.log(`   ⏭️  SKIPPING Entry 1 (not collector): ${voucherNum} - Status: ${c.status}`);
           }
           return; // Entry 1 handled, don't process further
         }
@@ -3126,6 +3471,8 @@ exports.getSelfWalletReport = async (req, res) => {
       });
       
       // 3. Expenses - Where user is approver (Approved/Completed only, no wallet transaction)
+      // IMPORTANT: Do NOT add Cash Out if approver is also expense owner (self-approval)
+      // When user approves their own expense, Payment Mode Account pays, not the approver
       allExpenses.forEach(expense => {
         const expenseId = expense._id ? expense._id.toString() : null;
         const hasWalletTransaction = expenseId && expensesWithWalletTransactions.has(expenseId);
@@ -3136,15 +3483,25 @@ exports.getSelfWalletReport = async (req, res) => {
             ? expense.approvedBy._id.toString() 
             : expense.approvedBy.toString()
         ) : null;
+        const expenseUserId = expense.userId ? (
+          typeof expense.userId === 'object' && expense.userId._id 
+            ? expense.userId._id.toString() 
+            : expense.userId.toString()
+        ) : null;
         const isApprover = approverId && approverId === userId.toString();
+        const isExpenseOwner = expenseUserId && expenseUserId === userId.toString();
+        const isSelfApproval = isApprover && isExpenseOwner; // User approved their own expense
         const isApproved = expense.status === 'Approved' || expense.status === 'Completed';
-        if (isApprover && isApproved) {
+        // Only add Cash Out if user is approver but NOT expense owner (someone else's expense)
+        if (isApprover && isApproved && !isSelfApproval) {
           totalCashOut += toSafeNumber(expense.amount);
         }
       });
       
       // 4. Collections - Where user is collector and collection is Approved (Option B: Money transferred from collector)
       // When collection is approved, collector's wallet gets CashOut (money transferred to receiver)
+      // CRITICAL: Only count cashOut when AutoPay is enabled OR when collector ≠ receiver (transfer happened)
+      // When AutoPay is disabled AND collector = receiver, NO transfer happened, so NO cashOut
       allCollections.forEach(c => {
         const isCollector = c.collectedBy && (
           (typeof c.collectedBy === 'object' && c.collectedBy._id && c.collectedBy._id.toString() === userId.toString()) ||
@@ -3156,8 +3513,29 @@ exports.getSelfWalletReport = async (req, res) => {
         // Only count Entry 1 (original collection), not Entry 2 (system collection)
         const isEntry1 = !c.isSystemCollection && !c.parentCollectionId;
         if (isCollector && isEntry1 && (c.status === 'Approved' || c.status === 'Verified')) {
-          totalCashOut += toSafeNumber(c.amount);
-          console.log(`   ✅ ADDED collection cashOut (collector, approved): Voucher ${c.voucherNumber || c._id} - Amount: ₹${c.amount}, Total cashOut now: ₹${totalCashOut}`);
+          // Check if transfer happened (AutoPay enabled OR collector ≠ receiver)
+          const paymentMode = c.paymentModeId;
+          // AutoPay now works with ALL modes including Cash (default mode)
+          const autoPayWasEnabled = paymentMode && paymentMode.autoPay === true;
+          const assignedReceiverId = c.assignedReceiver 
+            ? (typeof c.assignedReceiver === 'object' && c.assignedReceiver._id 
+               ? c.assignedReceiver._id.toString() 
+               : c.assignedReceiver.toString())
+            : null;
+          const collectorId = c.collectedBy 
+            ? (typeof c.collectedBy === 'object' && c.collectedBy._id 
+               ? c.collectedBy._id.toString() 
+               : c.collectedBy.toString())
+            : null;
+          const isCollectorSameAsReceiver = collectorId && assignedReceiverId && collectorId === assignedReceiverId;
+          
+          // Only count cashOut if transfer happened (AutoPay enabled OR collector ≠ receiver)
+          if (autoPayWasEnabled || !isCollectorSameAsReceiver) {
+            totalCashOut += toSafeNumber(c.amount);
+            console.log(`   ✅ ADDED collection cashOut (collector, approved, transfer happened): Voucher ${c.voucherNumber || c._id} - Amount: ₹${c.amount}, Total cashOut now: ₹${totalCashOut}`);
+          } else {
+            console.log(`   ⏭️  SKIPPING collection cashOut (AutoPay disabled AND collector = receiver, NO transfer happened): Voucher ${c.voucherNumber || c._id}`);
+          }
         }
       });
       
@@ -3276,9 +3654,43 @@ exports.getSelfWalletReport = async (req, res) => {
       );
 
       // Count collections where user is the collector
-      // Include Pending status (wallet updated on creation) and Approved/Verified status
+      // CRITICAL: Only count Pending if AutoPay was enabled (wallet updated at creation)
+      // CRITICAL: For Approved/Verified, only count Entry 2 (wallet updated via Entry 2), NOT Entry 1
       // Do NOT count if user is only the assigned receiver (they get cashIn from transaction, not collection)
-      if (isCollector && (c.status === 'Pending' || c.status === 'Approved' || c.status === 'Verified')) {
+      const paymentMode = c.paymentModeId;
+      // AutoPay now works with ALL modes including Cash (default mode)
+      // Check if assignedReceiver exists (handle both ObjectId and populated object)
+      const assignedReceiverValue = paymentMode?.assignedReceiver;
+      let hasAssignedReceiver = false;
+      if (assignedReceiverValue) {
+        if (typeof assignedReceiverValue === 'object' && assignedReceiverValue._id) {
+          // Populated object with _id
+          hasAssignedReceiver = assignedReceiverValue._id.toString() !== '' && assignedReceiverValue._id.toString() !== 'null';
+        } else if (typeof assignedReceiverValue === 'object' && assignedReceiverValue.toString) {
+          // ObjectId (not populated)
+          const receiverIdStr = assignedReceiverValue.toString();
+          hasAssignedReceiver = receiverIdStr !== '' && receiverIdStr !== 'null' && receiverIdStr.length > 0;
+        } else if (typeof assignedReceiverValue === 'string') {
+          // String ID
+          hasAssignedReceiver = assignedReceiverValue !== '' && assignedReceiverValue !== 'null';
+        } else {
+          // Other cases - check if truthy
+          hasAssignedReceiver = !!assignedReceiverValue;
+        }
+      }
+      const autoPayWasEnabled = paymentMode && paymentMode.autoPay === true && hasAssignedReceiver;
+      const shouldCountPending = c.status === 'Pending' && autoPayWasEnabled;
+      
+      // For Approved/Verified:
+      // - If AutoPay was enabled: Count Entry 1 (collector's cashIn from creation is still in wallet)
+      // - If AutoPay was disabled: Only count Entry 2 (system collection), NOT Entry 1
+      const isEntry1 = !c.isSystemCollection && !c.parentCollectionId;
+      const isEntry2 = c.isSystemCollection || !!c.parentCollectionId;
+      const shouldCountApprovedAutoPay = (c.status === 'Approved' || c.status === 'Verified') && isEntry1 && autoPayWasEnabled;
+      const shouldCountApprovedNoAutoPay = (c.status === 'Approved' || c.status === 'Verified') && isEntry2 && !autoPayWasEnabled;
+      const shouldCountApproved = shouldCountApprovedAutoPay || shouldCountApprovedNoAutoPay;
+      
+      if (isCollector && (shouldCountPending || shouldCountApproved)) {
         const amount = toSafeNumber(c.amount);
         cashIn += amount;
         

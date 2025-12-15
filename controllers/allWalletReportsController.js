@@ -2,6 +2,7 @@ const Wallet = require('../models/walletModel');
 const User = require('../models/userModel');
 const WalletTransaction = require('../models/walletTransactionModel');
 const PaymentMode = require('../models/paymentModeModel');
+const Collection = require('../models/collectionModel');
 
 // Helper function to calculate totals from all wallets
 const calculateAllUsersTotals = async () => {
@@ -398,6 +399,171 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
     
     console.log(`📊 [ALL WALLET REPORTS] Found ${walletTransactions.length} wallet transactions`);
     
+    // Query Collections (Entry 2 only - system collections)
+    console.log('📊 [ALL WALLET REPORTS] Querying Collection collection...');
+    
+    const mongoose = require('mongoose');
+    const collectionFilter = {};
+    const andConditions = [];
+    
+    // Entry 2 filter: isSystemCollection = true OR parentCollectionId exists
+    andConditions.push({
+      $or: [
+        { isSystemCollection: true },
+        { parentCollectionId: { $exists: true, $ne: null } }
+      ]
+    });
+    
+    // Apply userId filter if provided (collections where user is collectedBy OR assignedReceiver)
+    if (userId) {
+      const userIds = userId.includes(',') 
+        ? userId.split(',').map(id => id.trim()).filter(id => id)
+        : [userId];
+      
+      const userIdObjectIds = userIds.map(id => new mongoose.Types.ObjectId(id));
+      
+      andConditions.push({
+        $or: [
+          { collectedBy: { $in: userIdObjectIds } },
+          { assignedReceiver: { $in: userIdObjectIds } }
+        ]
+      });
+    }
+    
+    // Apply date range filter if provided
+    if (startDate || endDate) {
+      const dateFilter = {};
+      if (startDate) {
+        dateFilter.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        const endDateTime = new Date(endDate);
+        endDateTime.setHours(23, 59, 59, 999);
+        dateFilter.$lte = endDateTime;
+      }
+      andConditions.push({ createdAt: dateFilter });
+    }
+    
+    // Apply accountId filter if provided (accountId is the paymentModeId)
+    if (accountId) {
+      if (mongoose.Types.ObjectId.isValid(accountId)) {
+        andConditions.push({ paymentModeId: new mongoose.Types.ObjectId(accountId) });
+        console.log(`📊 [ALL WALLET REPORTS] Filtering collections by accountId (paymentModeId): ${accountId}`);
+      }
+    }
+    
+    // Combine all conditions with $and
+    if (andConditions.length > 0) {
+      collectionFilter.$and = andConditions;
+    }
+    
+    // Query Collections
+    const collections = await Collection.find(collectionFilter)
+      .populate('collectedBy', 'name email role')
+      .populate('from', 'name email role')
+      .populate('assignedReceiver', 'name email role')
+      .populate('approvedBy', 'name email role')
+      .populate('paymentModeId', 'modeName description')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    console.log(`📊 [ALL WALLET REPORTS] Found ${collections.length} collections`);
+    
+    // Transform Collections to table format with createdBy field
+    const transformedCollections = await Promise.all(
+      collections.map(async (col) => {
+        // Handle 'from' field - ensure it's populated
+        let fromUser = null;
+        if (col.from) {
+          if (typeof col.from === 'object' && col.from.name) {
+            fromUser = {
+              id: col.from._id,
+              name: col.from.name,
+              email: col.from.email,
+              role: col.from.role
+            };
+          } else {
+            const fromUserId = col.from._id || col.from.toString();
+            const fromUserDoc = await User.findById(fromUserId).select('name email role').lean();
+            if (fromUserDoc) {
+              fromUser = {
+                id: fromUserDoc._id,
+                name: fromUserDoc.name,
+                email: fromUserDoc.email,
+                role: fromUserDoc.role
+              };
+            }
+          }
+        }
+        // Fallback to collectedBy if from is not available
+        if (!fromUser && col.collectedBy && col.collectedBy.name) {
+          fromUser = {
+            id: col.collectedBy._id,
+            name: col.collectedBy.name,
+            email: col.collectedBy.email,
+            role: col.collectedBy.role
+          };
+        }
+        
+        return {
+          id: col._id,
+          type: 'Collections',
+          date: col.createdAt,
+          createdAt: col.createdAt,
+          collectedBy: col.collectedBy ? {
+            id: col.collectedBy._id,
+            name: col.collectedBy.name,
+            email: col.collectedBy.email,
+            role: col.collectedBy.role
+          } : null,
+          assignedReceiver: col.assignedReceiver ? {
+            id: col.assignedReceiver._id,
+            name: col.assignedReceiver.name,
+            email: col.assignedReceiver.email,
+            role: col.assignedReceiver.role
+          } : null,
+          approvedBy: col.approvedBy ? {
+            id: col.approvedBy._id,
+            name: col.approvedBy.name,
+            email: col.approvedBy.email,
+            role: col.approvedBy.role
+          } : null,
+          createdBy: (col.isSystemCollection || col.isSystematicEntry || !col.collectedBy) ? {
+            id: null,
+            name: 'System',
+            email: null,
+            role: 'System'
+          } : (col.collectedBy ? {
+            id: col.collectedBy._id,
+            name: col.collectedBy.name,
+            email: col.collectedBy.email,
+            role: col.collectedBy.role
+          } : null),
+          paymentModeId: col.paymentModeId 
+            ? (col.paymentModeId._id || col.paymentModeId.toString() || col.paymentModeId)
+            : null,
+          paymentMode: await getPaymentModeObject(col.paymentModeId),
+          voucherNumber: col.voucherNumber,
+          customerName: col.customerName,
+          from: fromUser ? fromUser.name : (col.collectedBy && col.collectedBy.name ? col.collectedBy.name : 'Unknown'),
+          to: (col.assignedReceiver && col.assignedReceiver.name) ? col.assignedReceiver.name : 'Unknown',
+          amount: col.amount,
+          mode: col.mode,
+          status: col.status,
+          notes: col.notes || '',
+          proofUrl: col.proofUrl || null,
+          flagReason: col.flagReason || null,
+          isAutoPay: col.paymentModeId?.autoPay && col.mode !== 'Cash',
+          isSystematicEntry: col.isSystematicEntry || false,
+          collectionType: col.collectionType || 'collection',
+          isSystemCollection: col.isSystemCollection || false,
+          parentCollectionId: col.parentCollectionId || null
+        };
+      })
+    );
+    
+    console.log(`📊 [ALL WALLET REPORTS] Transformed ${transformedCollections.length} collections`);
+    
     // Transform WalletTransactions to table format
     const transformedTransactions = await Promise.all(
       walletTransactions.map(async (wt) => {
@@ -476,6 +642,25 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
       })
     );
     
+    // Combine all data and sort (System entries first, then by date)
+    const combined = [
+      ...transformedTransactions,
+      ...transformedCollections
+    ].sort((a, b) => {
+      // Priority 1: System entries first (Entry 2 - isSystemCollection: true OR createdBy: System)
+      const aIsSystem = a.isSystemCollection === true || a.createdBy?.name === 'System' || a.isSystematicEntry === true;
+      const bIsSystem = b.isSystemCollection === true || b.createdBy?.name === 'System' || b.isSystematicEntry === true;
+      
+      // If one is System and other is not, System comes first
+      if (aIsSystem && !bIsSystem) return -1;
+      if (!aIsSystem && bIsSystem) return 1;
+      
+      // Priority 2: Sort by date (newest first)
+      const first = new Date(a.date || a.createdAt || 0).getTime();
+      const second = new Date(b.date || b.createdAt || 0).getTime();
+      return second - first;
+    });
+    
     // Calculate summary statistics for transactions
     const addAmountCount = transformedTransactions.filter(t => t.type === 'Add Amount').length;
     const addAmountTotal = transformedTransactions
@@ -487,9 +672,14 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
       .filter(t => t.type === 'Withdraw')
       .reduce((sum, t) => sum + toSafeNumber(t.amount), 0);
     
+    const collectionCount = transformedCollections.length;
+    const collectionTotal = transformedCollections
+      .reduce((sum, c) => sum + toSafeNumber(c.amount), 0);
+    
     console.log(`📊 [ALL WALLET REPORTS] Transaction Summary:`);
     console.log(`   Add Amount: ${addAmountCount} transactions, Total: ₹${addAmountTotal}`);
     console.log(`   Withdraw: ${withdrawCount} transactions, Total: ₹${withdrawTotal}`);
+    console.log(`   Collections: ${collectionCount} collections, Total: ₹${collectionTotal}`);
     
     const response = {
       success: true,
@@ -498,9 +688,11 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
         addAmountCount,
         addAmountTotal,
         withdrawCount,
-        withdrawTotal
+        withdrawTotal,
+        collectionCount,
+        collectionTotal
       },
-      transactions: transformedTransactions,
+      transactions: combined,
       filters: {
         userId: userId || null,
         startDate: startDate || null,
@@ -509,6 +701,8 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
       },
       userCount: userCount,
       transactionCount: transformedTransactions.length,
+      collectionCount: transformedCollections.length,
+      totalCount: combined.length,
       lastUpdated: new Date().toISOString()
     };
     
@@ -518,7 +712,8 @@ exports.getAllWalletReportsWithFilters = async (req, res) => {
     console.log('   report:', JSON.stringify(response.report, null, 2));
     console.log('   userCount:', userCount);
     console.log('   transactionCount:', response.transactionCount);
-    console.log('   transactions:', transformedTransactions.length, 'entries');
+    console.log('   collectionCount:', response.collectionCount);
+    console.log('   totalCount:', response.totalCount, 'entries');
     console.log('   filters:', JSON.stringify(response.filters, null, 2));
     console.log('═══════════════════════════════════════════════════════════');
     

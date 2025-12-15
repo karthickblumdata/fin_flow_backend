@@ -336,13 +336,37 @@ exports.createExpense = async (req, res) => {
       });
     }
 
+    // If paymentModeId is not provided, try to find a matching Payment Mode based on expense mode
+    let finalPaymentModeId = paymentModeId;
+    if (!finalPaymentModeId) {
+      const PaymentMode = require('../models/paymentModeModel');
+      // Try to find first active Payment Mode that matches the expense mode (Cash/UPI/Bank)
+      // This ensures pending expenses have a paymentModeId for display in Smart Approvals
+      const matchingPaymentMode = await PaymentMode.findOne({
+        isActive: true,
+        description: { $regex: new RegExp(`mode:${finalMode}`, 'i') }
+      }).sort({ createdAt: 1 });
+      
+      if (matchingPaymentMode) {
+        finalPaymentModeId = matchingPaymentMode._id;
+        console.log(`[Expense Creation] Auto-assigned paymentModeId: ${matchingPaymentMode.modeName} (${finalPaymentModeId}) based on mode: ${finalMode}`);
+      } else {
+        // Fallback: Use first active Payment Mode (index 0) if no match found
+        const firstPaymentMode = await PaymentMode.findOne({ isActive: true }).sort({ createdAt: 1 });
+        if (firstPaymentMode) {
+          finalPaymentModeId = firstPaymentMode._id;
+          console.log(`[Expense Creation] Auto-assigned first active paymentModeId: ${firstPaymentMode.modeName} (${finalPaymentModeId}) as fallback`);
+        }
+      }
+    }
+
     // Prepare expense data (use normalized category name)
     const expenseData = {
       userId: targetUserId,
       category: finalCategoryName,
       amount,
       mode: finalMode,
-      paymentModeId: paymentModeId || null,
+      paymentModeId: finalPaymentModeId || null,
       createdBy: req.user._id,
       status: 'Pending'
     };
@@ -513,6 +537,7 @@ exports.getExpenses = async (req, res) => {
       .populate('userId', 'name email role')
       .populate('createdBy', 'name email role')
       .populate('approvedBy', 'name email role')
+      .populate('paymentModeId', 'modeName description')
       .sort({ createdAt: -1 });
 
     res.status(200).json({
@@ -669,7 +694,9 @@ exports.approveExpense = async (req, res) => {
     expense.approvedBy = req.user._id;
     expense.approvedAt = new Date();
     // Save the Payment Mode ID that paid for this expense
-    if (firstPaymentMode && !wasAlreadyApproved) {
+    // Always save paymentModeId if firstPaymentMode exists and expense doesn't have it yet
+    // This ensures old expenses (approved before paymentModeId feature) also get the ID saved
+    if (firstPaymentMode && (!expense.paymentModeId || !wasAlreadyApproved)) {
       expense.paymentModeId = firstPaymentMode._id;
       console.log(`[Expense Approval] ✅ Saved paymentModeId: ${firstPaymentMode._id} (${firstPaymentMode.modeName}) to expense`);
     }
